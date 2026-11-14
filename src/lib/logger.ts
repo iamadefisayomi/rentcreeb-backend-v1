@@ -1,5 +1,19 @@
+
 import pino from 'pino';
-import { isProd } from '../config/env';
-export const logger = pino(
-  isProd ? { level: 'info' } : { level: 'debug', transport: { target: 'pino-pretty' } },
-);
+
+const isDevelopment = process.env.NODE_ENV !== 'production';
+
+export const logger = pino({
+  level: process.env.LOG_LEVEL || (isDevelopment ? 'debug' : 'info'),
+
+  ...(isDevelopment && {
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        translateTime: 'SYS:standard',
+        ignore: 'pid,hostname',
+      },
+    },
+  }),
+});
