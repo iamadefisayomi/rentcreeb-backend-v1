@@ -1,23 +1,20 @@
-# Use a lightweight Node.js image
-FROM node:20-alpine
 
-# Install nodemon globally for live-reloading
-RUN npm install -g nodemon
+FROM node:22-alpine
 
-# Set the working directory inside the container
-WORKDIR /src/app
+WORKDIR /app
 
-# Copy package files first to leverage Docker's cache system
 COPY package*.json ./
 
-# Install all dependencies (including devDependencies like nodemon/babel)
-RUN npm install
+RUN npm ci
 
-# Copy the rest of your Express application code
 COPY . .
 
-# Expose the port your Express server runs on
+RUN npm run build
+
+ENV NODE_ENV=production
+
+RUN npm prune --omit=dev
+
 EXPOSE 4000
 
-# Run the app using a development script (defined in your package.json)
-CMD ["npm", "run", "dev"]
+CMD ["npm", "start"]
