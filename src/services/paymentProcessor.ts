@@ -62,13 +62,13 @@ async function onInspection(p: any) {
 }
 
 async function onSubscription(p: any) {
-  const { data: sub } = await db.from('subscriptions').select('*, subscription_plans(interval_days)').eq('id', p.subscription_id).single();
+  const { data: sub } = await db.from('subscriptions').select('*, billing_cycle, subscription_plans(interval_days)').eq('id', p.subscription_id).single();
   if (!sub) return;
   const now = new Date();
   await db.from('subscriptions').update({ status: 'expired' }).eq('agent_id', sub.agent_id).eq('status', 'active');
   await db.from('subscriptions').update({
     status: 'active', starts_at: now.toISOString(),
-    expires_at: addDays(now, (sub as any).subscription_plans.interval_days).toISOString(),
+    expires_at: addDays(now, (sub as any).billing_cycle === 'yearly' ? 365 : (sub as any).subscription_plans.interval_days).toISOString(),
   }).eq('id', sub.id);
   await notify(sub.agent_id, 'subscription_active', 'Plan activated', 'Your subscription is active. You can now list properties.');
 }

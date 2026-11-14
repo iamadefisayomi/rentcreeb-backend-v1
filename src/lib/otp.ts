@@ -19,10 +19,10 @@ function scoped(s: Scope) {
   return q;
 }
 
-/** Creates a new OTP (invalidating older ones for the same scope) and returns the plain code. */
-export async function issueOtp(s: Scope & { phone?: string }) {
+/** Creates a new OTP. `ttlMin` overrides the purpose default; `skipCooldown` is for codes shown in-app (no SMS cost). */
+export async function issueOtp(s: Scope & { phone?: string; ttlMin?: number; skipCooldown?: boolean }) {
   const { data: last } = await scoped(s).is('consumed_at', null).order('created_at', { ascending: false }).limit(1).maybeSingle();
-  if (last && Date.now() - new Date(last.created_at).getTime() < RESEND_COOLDOWN_SEC * 1000)
+  if (!s.skipCooldown && last && Date.now() - new Date(last.created_at).getTime() < RESEND_COOLDOWN_SEC * 1000)
     throw new HttpError(429, `Please wait ${RESEND_COOLDOWN_SEC}s before requesting another code`, 'OTP_COOLDOWN');
 
   let del = db.from('otp_codes').delete().eq('purpose', s.purpose).is('consumed_at', null);
@@ -33,7 +33,7 @@ export async function issueOtp(s: Scope & { phone?: string }) {
   const code = randomInt(100000, 1000000).toString();
   await db.from('otp_codes').insert({
     purpose: s.purpose, user_id: s.userId ?? null, booking_id: s.bookingId ?? null, phone: s.phone ?? null,
-    code_hash: hash(code), expires_at: new Date(Date.now() + TTL_MIN[s.purpose] * 60000).toISOString(),
+    code_hash: hash(code), expires_at: new Date(Date.now() + (s.ttlMin ?? TTL_MIN[s.purpose]) * 60000).toISOString(),
   });
   return code;
 }

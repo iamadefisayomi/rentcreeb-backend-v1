@@ -15,9 +15,9 @@ function summarize(ratings: number[]) {
   return { total, average: total ? +(ratings.reduce((a, b) => a + b, 0) / total).toFixed(1) : 0, distribution: dist };
 }
 
-async function list(column: 'property_id' | 'agent_id', id: string, query: unknown) {
+async function list(column: 'property_id' | 'agent_id', id: string, query: unknown, select = SELECT) {
   const { from, to, page, limit } = paginate(query);
-  const { data } = await db.from('reviews').select(SELECT).eq(column, id).eq('hidden', false).order('created_at', { ascending: false }).range(from, to);
+  const { data } = await db.from('reviews').select(select).eq(column, id).eq('hidden', false).order('created_at', { ascending: false }).range(from, to);
   const { data: all } = await db.from('reviews').select('rating').eq(column, id).eq('hidden', false);
   return { reviews: data, summary: summarize((all ?? []).map((x) => x.rating)), page, limit };
 }
@@ -27,18 +27,19 @@ r.get('/agent/:agentId', async (req, res) => res.json(await list('agent_id', req
 
 /** Reviews received by the logged-in agent/landlord (for responding). */
 r.get('/received', authenticate, requireRole('agent', 'landlord', 'estate_manager'), async (req, res) =>
-  res.json(await list('agent_id', req.user.id, req.query)));
+  // Agent "My Reviews" (Figma 4549:326) also shows the property and whether a review has been flagged.
+  res.json(await list('agent_id', req.user.id, req.query, `${SELECT}, flag_count, properties(title, area)`)));
 
 /** Only verified tenants who completed an inspection of that property can review. */
 r.post('/', authenticate, requireRole('tenant'), requireVerified, async (req, res) => {
-  const b = z.object({ bookingId: uuid, rating: z.number().int().min(1).max(5), comment: z.string().max(1000).optional() }).parse(req.body);
+  const b = z.object({ bookingId: uuid, rating: z.number().int().min(1).max(5), comment: z.string().max(1000).optional(), agentRating: z.number().int().min(1).max(5).optional() }).parse(req.body);
   const { data: bk } = await db.from('bookings').select('*').eq('id', b.bookingId).eq('tenant_id', req.user.id).maybeSingle();
   if (!bk) throw notFound('Booking not found');
   if (bk.status !== 'completed') throw forbidden('You can review after your inspection is completed', 'REVIEW_NOT_ALLOWED');
   const { data: dup } = await db.from('reviews').select('id').eq('booking_id', bk.id).maybeSingle();
   if (dup) throw conflict('You already reviewed this inspection');
   const review = unwrap(await db.from('reviews').insert({
-    property_id: bk.property_id, booking_id: bk.id, agent_id: bk.host_id, reviewer_id: req.user.id, rating: b.rating, comment: b.comment,
+    property_id: bk.property_id, booking_id: bk.id, agent_id: bk.host_id, reviewer_id: req.user.id, rating: b.rating, comment: b.comment, ...(b.agentRating ? { agent_rating: b.agentRating } : {}),
   }).select().single());
   await notify(bk.host_id, 'new_review', 'New review', `${b.rating}★ ${b.comment?.slice(0, 80) ?? ''}`, { reviewId: review.id });
   res.status(201).json({ review });

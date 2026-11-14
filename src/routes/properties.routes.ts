@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { db, unwrap } from '../lib/supabase';
+import { db, dbError, unwrap } from '../lib/supabase';
 import { badRequest, forbidden, notFound } from '../lib/errors';
 import { kobo, paginate, uuid } from '../lib/common';
 import { authenticate, optionalAuth, requireRole, requireVerified } from '../middleware/auth';
 import { deleteFromBunny, signPrivateUrl } from '../lib/bunny';
+import { env } from '../config/env';
 
 const r = Router();
 const LISTER_ROLES = ['agent', 'landlord', 'estate_manager'] as const;
@@ -35,6 +36,9 @@ const propertyBody = z.object({
   bedrooms: z.number().int().min(0).default(0), bathrooms: z.number().int().min(0).default(0),
   sizeSqm: z.number().positive().optional(), parking: z.boolean().default(false),
   amenities: z.array(z.string()).default([]), inspectionFeeKobo: kobo.optional(),
+  parkingSpaces: z.number().int().min(0).max(50).optional(), yearBuilt: z.number().int().min(1900).max(2100).optional(),
+  landmark: z.string().trim().max(120).optional(), cautionFeeKobo: kobo.optional(), agencyFeeKobo: kobo.optional(),
+  securityFeatures: z.array(z.string().max(40)).max(12).optional(),
   media: z.array(mediaItem).max(30).default([]),
   /** false = private/managed property (landlord tools only), never shown in search */
   publish: z.boolean().default(true),
@@ -48,6 +52,8 @@ const row = (b: z.infer<typeof propertyBody>) => ({
   lat: b.lat, lng: b.lng, price_kobo: b.priceKobo, price_period: b.pricePeriod, property_type: b.propertyType,
   bedrooms: b.bedrooms, bathrooms: b.bathrooms, size_sqm: b.sizeSqm, parking: b.parking, amenities: b.amenities,
   inspection_fee_kobo: b.inspectionFeeKobo,
+  parking_spaces: b.parkingSpaces, year_built: b.yearBuilt, landmark: b.landmark,
+  caution_fee_kobo: b.cautionFeeKobo, agency_fee_kobo: b.agencyFeeKobo, security_features: b.securityFeatures,
 });
 
 async function assertOwner(propertyId: string, userId: string) {
@@ -112,7 +118,13 @@ r.get('/', async (req, res) => {
 
   const { data, count, error } = await query.range(from, to);
   if (error) throw badRequest(error.message);
-  res.json({ properties: data, page, limit, total: count ?? 0 });
+  // "Popular" tag on cards: 10+ views in the last 30 days.
+  const ids = (data ?? []).map((p: any) => p.id);
+  const since = new Date(Date.now() - 30 * 864e5).toISOString();
+  const views = ids.length ? (await db.from('property_views').select('property_id').in('property_id', ids).gte('created_at', since)).data ?? [] : [];
+  const viewCount = new Map<string, number>();
+  for (const v of views) viewCount.set(v.property_id, (viewCount.get(v.property_id) ?? 0) + 1);
+  res.json({ properties: (data ?? []).map((p: any) => ({ ...p, popular: (viewCount.get(p.id) ?? 0) >= 10 })), page, limit, total: count ?? 0 });
 });
 
 // ── Static paths before /:id ──
@@ -140,9 +152,92 @@ r.get('/mine', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   })) });
 });
 
+// ── Saved ──
+/**
+ * Saved Properties (Figma 4510:13893). Each card carries when/at what price it was saved (price-drop alert),
+ * whether it is still available, and which collections it belongs to.
+ */
 r.get('/saved', authenticate, async (req, res) => {
-  const { data } = await db.from('saved_properties').select(`created_at, properties(${CARD})`).eq('user_id', req.user.id).order('created_at', { ascending: false });
-  res.json({ properties: (data ?? []).map((d: any) => d.properties) });
+  const [saved, cols] = await Promise.all([
+    db.from('saved_properties').select(`created_at, saved_price_kobo, properties(${CARD})`).eq('user_id', req.user.id).order('created_at', { ascending: false }),
+    db.from('saved_collections').select('id, saved_collection_items(property_id)').eq('user_id', req.user.id),
+  ]);
+  if (saved.error) throw dbError(saved.error);
+  const inCols = new Map<string, string[]>();
+  for (const c of (cols.data ?? []) as any[]) for (const it of c.saved_collection_items ?? []) inCols.set(it.property_id, [...(inCols.get(it.property_id) ?? []), c.id]);
+  res.json({
+    properties: (saved.data ?? []).filter((d: any) => d.properties).map((d: any) => ({
+      ...d.properties, savedAt: d.created_at, savedPriceKobo: d.saved_price_kobo ?? d.properties.price_kobo,
+      available: d.properties.status === 'approved', collectionIds: inCols.get(d.properties.id) ?? [],
+    })),
+  });
+});
+
+r.get('/collections', authenticate, async (req, res) => {
+  const { data, error } = await db.from('saved_collections')
+    .select('id, name, created_at, saved_collection_items(property_id, properties(property_media(url, position)))')
+    .eq('user_id', req.user.id).order('created_at');
+  if (error) throw dbError(error);
+  res.json({
+    collections: (data ?? []).map((c: any) => ({
+      id: c.id, name: c.name, count: (c.saved_collection_items ?? []).length,
+      covers: (c.saved_collection_items ?? []).slice(0, 4).map((i: any) => [...(i.properties?.property_media ?? [])].sort((a: any, b: any) => a.position - b.position)[0]?.url).filter(Boolean),
+    })),
+  });
+});
+
+const collectionName = z.object({ name: z.string().trim().min(1, 'Give the collection a name').max(40) });
+r.post('/collections', authenticate, async (req, res) => {
+  const { name } = collectionName.parse(req.body);
+  const { count } = await db.from('saved_collections').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id);
+  if ((count ?? 0) >= 20) throw badRequest('You can have up to 20 collections', 'TOO_MANY_COLLECTIONS');
+  const { data, error } = await db.from('saved_collections').insert({ user_id: req.user.id, name }).select('id, name').single();
+  if (error?.code === '23505') throw badRequest('You already have a collection with that name', 'DUPLICATE_COLLECTION');
+  if (error) throw dbError(error);
+  res.status(201).json({ collection: { ...data, count: 0, covers: [] } });
+});
+r.patch('/collections/:cid', authenticate, async (req, res) => {
+  const { name } = collectionName.parse(req.body);
+  const { data, error } = await db.from('saved_collections').update({ name }).eq('id', uuid.parse(req.params.cid)).eq('user_id', req.user.id).select('id, name').maybeSingle();
+  if (error?.code === '23505') throw badRequest('You already have a collection with that name', 'DUPLICATE_COLLECTION');
+  if (error) throw dbError(error);
+  if (!data) throw notFound('Collection not found');
+  res.json({ collection: data });
+});
+r.delete('/collections/:cid', authenticate, async (req, res) => {
+  await db.from('saved_collections').delete().eq('id', uuid.parse(req.params.cid)).eq('user_id', req.user.id);
+  res.status(204).end();
+});
+
+/** Set which of the user's collections a saved property belongs to (saves it first if needed). */
+r.put('/:id/collections', authenticate, async (req, res) => {
+  const pid = uuid.parse(req.params.id);
+  const { collectionIds } = z.object({ collectionIds: z.array(uuid).max(20) }).parse(req.body);
+  const { data: mine } = await db.from('saved_collections').select('id').eq('user_id', req.user.id);
+  const owned = new Set((mine ?? []).map((c) => c.id));
+  if (collectionIds.some((c) => !owned.has(c))) throw forbidden('Unknown collection');
+  const { data: prop } = await db.from('properties').select('price_kobo').eq('id', pid).maybeSingle();
+  if (!prop) throw notFound('Property not found');
+  await db.from('saved_properties').upsert({ user_id: req.user.id, property_id: pid, saved_price_kobo: prop.price_kobo }, { onConflict: 'user_id,property_id', ignoreDuplicates: true });
+  if (owned.size) await db.from('saved_collection_items').delete().eq('property_id', pid).in('collection_id', [...owned]);
+  if (collectionIds.length) await db.from('saved_collection_items').insert(collectionIds.map((collection_id) => ({ collection_id, property_id: pid })));
+  res.json({ collectionIds });
+});
+
+r.post('/:id/save', authenticate, async (req, res) => {
+  const pid = uuid.parse(req.params.id);
+  const { data: prop } = await db.from('properties').select('price_kobo').eq('id', pid).maybeSingle();
+  if (!prop) throw notFound('Property not found');
+  await db.from('saved_properties').upsert({ user_id: req.user.id, property_id: pid, saved_price_kobo: prop.price_kobo }, { onConflict: 'user_id,property_id', ignoreDuplicates: true });
+  res.status(204).end();
+});
+r.delete('/:id/save', authenticate, async (req, res) => {
+  const pid = uuid.parse(req.params.id);
+  await db.from('saved_properties').delete().eq('user_id', req.user.id).eq('property_id', pid);
+  // Unsaving also removes it from every collection, as the "Remove from Saved?" sheet promises.
+  const { data: mine } = await db.from('saved_collections').select('id').eq('user_id', req.user.id);
+  if (mine?.length) await db.from('saved_collection_items').delete().eq('property_id', pid).in('collection_id', mine.map((c) => c.id));
+  res.status(204).end();
 });
 
 r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (req, res) => {
@@ -177,7 +272,8 @@ r.get('/:id', optionalAuth, async (req, res) => {
   ]);
   const ratings = (stats.data ?? []).map((x) => x.rating);
   res.json({
-    property: { ...p, property_media: (p.property_media ?? []).sort((a: any, b: any) => a.position - b.position) },
+    // Effective inspection fee (listing override or the platform default) so the booking summary can show it up front.
+    property: { ...p, inspection_fee_kobo: Number(p.inspection_fee_kobo ?? env.INSPECTION_FEE_KOBO), property_media: (p.property_media ?? []).sort((a: any, b: any) => a.position - b.position) },
     agent: { ...owner.data, listingsCount: listings.count ?? 0 },
     reviewsSummary: { count: ratings.length, average: ratings.length ? +(ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : 0 },
     similar: similar.data,
@@ -321,14 +417,5 @@ r.post('/:id/nearby', authenticate, requireRole(...LISTER_ROLES), async (req, re
   res.status(201).json({ places: unwrap(await db.from('nearby_places').insert(rows).select()) });
 });
 
-// ── Saved ──
-r.post('/:id/save', authenticate, async (req, res) => {
-  await db.from('saved_properties').upsert({ user_id: req.user.id, property_id: uuid.parse(req.params.id) });
-  res.status(204).end();
-});
-r.delete('/:id/save', authenticate, async (req, res) => {
-  await db.from('saved_properties').delete().eq('user_id', req.user.id).eq('property_id', req.params.id);
-  res.status(204).end();
-});
 
 export default r;

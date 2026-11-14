@@ -83,6 +83,19 @@ r.post('/:id/resend-otp', async (req, res) => {
   res.json({ message: 'Code resent' });
 });
 
+/**
+ * Tenant "Show OTP" (Figma "Inspection OTP" 4502:1914): issues a fresh 15-minute inspection code and returns it to the
+ * signed-in tenant to show the agent at the property. Replaces any earlier inspection code (incl. the SMS one).
+ */
+const SHOW_CODE_MIN = 15;
+r.post('/:id/inspection-code', async (req, res) => {
+  const b = await getBooking(String(req.params.id), req.user.id);
+  if (b.tenant_id !== req.user.id) throw forbidden();
+  if (b.status !== 'confirmed') throw badRequest('Your inspection code is available once the booking is confirmed', 'BAD_STATE');
+  const code = await issueOtp({ purpose: 'booking_inspection', bookingId: b.id, ttlMin: SHOW_CODE_MIN, skipCooldown: true });
+  res.json({ code, expiresAt: new Date(Date.now() + SHOW_CODE_MIN * 60000).toISOString() });
+});
+
 /** Host validates the tenant's inspection code at the property → escrow released to host wallet. */
 r.post('/:id/validate-inspection', requireRole('agent', 'landlord', 'estate_manager'), async (req, res) => {
   const { code } = z.object({ code: z.string().length(6) }).parse(req.body);

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { db, unwrap } from '../lib/supabase';
+import { db, dbError, unwrap, unwrapMaybe } from '../lib/supabase';
 import { conflict } from '../lib/errors';
 import { sendEmail } from '../lib/email';
 import { logger } from '../lib/logger';
@@ -34,9 +34,9 @@ r.post('/tickets', async (req, res) => {
   }).parse(req.body);
 
   if (b.kind === 'data_request') {
-    const { data: pending } = await db.from('support_tickets').select('id').eq('user_id', req.user.id)
-      .eq('kind', 'data_request').in('status', ['open', 'in_progress']).maybeSingle();
-    if (pending) throw conflict('You already have a data request in progress. We will email you when it is ready.', 'REQUEST_PENDING');
+    const pending = unwrap(await db.from('support_tickets').select('id').eq('user_id', req.user.id)
+      .eq('kind', 'data_request').in('status', ['open', 'in_progress']).limit(1));
+    if (pending.length) throw conflict('You already have a data request in progress. We will email you when it is ready.', 'REQUEST_PENDING');
   }
 
   const ticket = unwrap(await db.from('support_tickets').insert({
@@ -57,9 +57,9 @@ r.post('/tickets', async (req, res) => {
 });
 
 r.get('/tickets', async (req, res) => {
-  const { data } = await db.from('support_tickets').select('id, kind, category, subject, status, created_at')
-    .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(20);
-  res.json({ tickets: data ?? [] });
+  const tickets = unwrap(await db.from('support_tickets').select('id, kind, category, subject, status, created_at')
+    .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(20));
+  res.json({ tickets });
 });
 
 r.post('/feedback', async (req, res) => {
@@ -77,9 +77,9 @@ r.post('/feedback', async (req, res) => {
 });
 
 r.get('/feedback/latest', async (req, res) => {
-  const { data } = await db.from('app_feedback').select('rating, tags, comment, created_at')
-    .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(1).maybeSingle();
-  res.json({ feedback: data ?? null });
+  const feedback = unwrapMaybe(await db.from('app_feedback').select('rating, tags, comment, created_at')
+    .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(1).maybeSingle());
+  res.json({ feedback: feedback ?? null });
 });
 
 r.get('/privacy-prefs', async (req, res) => {
@@ -91,7 +91,8 @@ r.put('/privacy-prefs', async (req, res) => {
   const b = z.record(z.enum(keys), z.boolean()).parse(req.body?.prefs ?? {});
   const merged = { ...((req.user as any).privacy_prefs ?? {}), ...b };
   delete (merged as any).essential;
-  await db.from('profiles').update({ privacy_prefs: merged, updated_at: new Date().toISOString() }).eq('id', req.user.id);
+  const { error } = await db.from('profiles').update({ privacy_prefs: merged, updated_at: new Date().toISOString() }).eq('id', req.user.id);
+  if (error) throw dbError(error);
   res.json({ prefs: resolvePrivacy(merged) });
 });
 

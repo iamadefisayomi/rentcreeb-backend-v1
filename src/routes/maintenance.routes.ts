@@ -36,12 +36,15 @@ r.post('/', requireRole('tenant'), async (req, res) => {
   const b = z.object({
     tenancyId: uuid, category: z.string().min(2), description: z.string().min(5),
     urgency: z.enum(['standard', 'urgent']).default('standard'), mediaUrls: z.array(z.string().url()).max(6).default([]),
+    // Tenant's own read of how urgent it is (Figma: Low / Medium / High / Emergency). Landlords can change it later.
+    priority: z.enum(['low', 'medium', 'high', 'emergency']).optional(),
   }).parse(req.body);
+  const urgency = b.priority ? (b.priority === 'high' || b.priority === 'emergency' ? 'urgent' : 'standard') : b.urgency;
   const { data: t } = await db.from('tenancies').select('*').eq('id', b.tenancyId).eq('tenant_id', req.user.id).eq('status', 'active').maybeSingle();
   if (!t) throw notFound('Active tenancy not found');
   const m = unwrap(await db.from('maintenance_requests').insert({
     tenancy_id: t.id, property_id: t.property_id, tenant_id: req.user.id, landlord_id: t.landlord_id,
-    category: b.category, description: b.description, urgency: b.urgency }).select().single());
+    category: b.category, description: b.description, urgency, ...(b.priority ? { priority: b.priority } : {}) }).select().single());
   if (b.mediaUrls.length) await db.from('maintenance_media').insert(b.mediaUrls.map((url) => ({ request_id: m.id, url })));
   await logMaintenance(m.id, req.user.id, 'submitted', 'Ticket submitted by tenant');
   await notify(t.landlord_id, 'maintenance_request', 'New maintenance request', `${b.category}: ${b.description.slice(0, 80)}`, { requestId: m.id });

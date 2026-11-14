@@ -8,7 +8,7 @@ import { uploadToBunny } from '../lib/bunny';
 const r = Router();
 r.use(authenticate, requirePhoneVerified);
 
-const PUBLIC_FOLDERS = ['avatars', 'properties', 'maintenance', 'jobs', 'portfolio', 'chat'] as const;
+const PUBLIC_FOLDERS = ['avatars', 'properties', 'maintenance', 'jobs', 'portfolio', 'chat', 'reports'] as const;
 const PRIVATE_FOLDERS = ['artisan-docs', 'property-docs'] as const;
 const ALLOWED = /^(image\/(jpeg|png|webp|heic|heif)|video\/(mp4|quicktime)|application\/pdf)$/;
 // Android pickers sometimes send image/jpg or a bare type; normalise from the extension when needed.

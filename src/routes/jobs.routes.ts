@@ -19,7 +19,7 @@ async function artisanApproved(userId: string) {
   return data;
 }
 async function getJob(id: string) {
-  const { data } = await db.from('jobs').select('*, properties(id, title, address, area, lat, lng, property_media(url, position))').eq('id', id).maybeSingle();
+  const { data } = await db.from('jobs').select('*, properties(id, title, address, area, lat, lng, property_type, bedrooms, property_media(url, position))').eq('id', id).maybeSingle();
   if (!data) throw notFound('Job not found');
   return data as any;
 }
@@ -218,18 +218,19 @@ r.get('/:id', async (req, res) => {
   const job = await getJob(String(req.params.id));
   const privileged = [job.landlord_id, job.tenant_id, job.artisan_id].includes(req.user.id);
   if (!privileged && req.user.role !== 'artisan') throw forbidden();
-  const [media, landlord, quotes, myQuote, report] = await Promise.all([
+  const [media, landlord, quotes, myQuote, report, posted] = await Promise.all([
     db.from('job_media').select('kind, url').eq('job_id', job.id),
     db.from('profiles').select('id, first_name, last_name, avatar_url, rating_avg, nin_verified').eq('id', job.landlord_id).single(),
     db.from('job_quotes').select('id', { count: 'exact', head: true }).eq('job_id', job.id),
     db.from('job_quotes').select('*').eq('job_id', job.id).eq('artisan_id', req.user.id).maybeSingle(),
     db.from('job_reports').select('*').eq('job_id', job.id).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    db.from('jobs').select('id', { count: 'exact', head: true }).eq('landlord_id', job.landlord_id),
   ]);
   const { properties, ...rest } = job;
   res.json({
-    job: { ...rest, property: privileged ? properties : { area: properties.area, lat: properties.lat, lng: properties.lng },
+    job: { ...rest, property: privileged ? properties : { area: properties.area, lat: properties.lat, lng: properties.lng, property_type: properties.property_type, bedrooms: properties.bedrooms },
            access_notes: privileged ? job.access_notes : null },
-    media: media.data, landlord: landlord.data, quotesCount: quotes.count ?? 0, myQuote: myQuote.data, report: privileged ? report.data : null,
+    media: media.data, landlord: landlord.data ? { ...landlord.data, jobsPosted: posted.count ?? 0 } : landlord.data, quotesCount: quotes.count ?? 0, myQuote: myQuote.data, report: privileged ? report.data : null,
   });
 });
 

@@ -17,19 +17,44 @@ function lastMonths(n: number) {
 const monthStart = () => { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d.toISOString(); };
 
 /** Tenant: rent tracking, savings overview, open maintenance, recent transactions. */
+/** Tenant dashboard (Figma "Tenant Dashboard" 4502:3290): rent, RentSave, upcoming inspections, maintenance, transactions. */
 r.get('/tenant', requireRole('tenant'), async (req, res) => {
-  const [tenancies, plans, maint, tx] = await Promise.all([
-    db.from('tenancies').select('*, properties(title, address), rent_payments(id, amount_kobo, due_date, status)').eq('tenant_id', req.user.id).eq('status', 'active'),
-    db.from('rentsave_plans').select('*').eq('tenant_id', req.user.id).neq('status', 'paused'),
-    db.from('maintenance_requests').select('id, category, status, created_at').eq('tenant_id', req.user.id).in('status', ['open', 'job_posted', 'in_progress']),
-    db.from('payments').select('id, purpose, amount_kobo, status, created_at').eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(5),
+  const uid = req.user.id;
+  const [tenancies, plans, maint, tx, bookings] = await Promise.all([
+    db.from('tenancies').select('*, properties(title, address, area), rent_payments(id, amount_kobo, due_date, status, payment_id, paid_at)').eq('tenant_id', uid).eq('status', 'active'),
+    db.from('rentsave_plans').select('*').eq('tenant_id', uid).neq('status', 'paused'),
+    db.from('maintenance_requests').select('id, category, description, status, created_at, jobs(status, artisan:profiles!jobs_artisan_id_fkey(first_name, last_name))')
+      .eq('tenant_id', uid).in('status', ['open', 'job_posted', 'in_progress']).order('created_at', { ascending: false }),
+    db.from('payments').select('id, purpose, amount_kobo, status, created_at, paid_at, booking_id, tenancy_id, rentsave_plan_id').eq('user_id', uid).eq('status', 'success').order('created_at', { ascending: false }).limit(5),
+    db.from('bookings').select('id, scheduled_at, status, properties(title, area, property_media(url, position)), host:profiles!bookings_host_id_fkey(first_name, last_name)')
+      .eq('tenant_id', uid).in('status', ['paid', 'confirmed']).gte('scheduled_at', new Date().toISOString()).order('scheduled_at').limit(3),
   ]);
+  const planRows = plans.data ?? [];
   res.json({
-    rent: (tenancies.data ?? []).map((t: any) => ({
-      tenancyId: t.id, property: t.properties, rentKobo: t.rent_kobo, nextDueDate: t.next_due_date,
-      due: (t.rent_payments ?? []).filter((p: any) => p.status !== 'paid').sort((a: any, b: any) => a.due_date.localeCompare(b.due_date))[0] ?? null })),
-    savings: { totalSavedKobo: sum(plans.data, (p) => Number(p.saved_kobo)), plans: plans.data },
-    openMaintenance: maint.data, recentTransactions: tx.data,
+    rent: (tenancies.data ?? []).map((t: any) => {
+      const pays = (t.rent_payments ?? []) as any[];
+      const lastPaid = pays.filter((p) => p.status === 'paid' && p.payment_id).sort((a, b) => (b.paid_at ?? '').localeCompare(a.paid_at ?? ''))[0];
+      return {
+        tenancyId: t.id, property: t.properties, rentKobo: t.rent_kobo, frequency: t.frequency, nextDueDate: t.next_due_date, leaseStart: t.lease_start,
+        due: pays.filter((p) => p.status !== 'paid').sort((a, b) => a.due_date.localeCompare(b.due_date))[0] ?? null,
+        lastReceiptPaymentId: lastPaid?.payment_id ?? null,
+      };
+    }),
+    savings: {
+      totalSavedKobo: sum(planRows, (p) => Number(p.saved_kobo)), targetKobo: sum(planRows, (p) => Number(p.target_kobo)),
+      frequency: planRows[0]?.frequency ?? null, plans: planRows,
+    },
+    openMaintenance: (maint.data ?? []).map((m: any) => {
+      const job = (m.jobs ?? [])[0];
+      return { id: m.id, category: m.category, description: m.description, status: m.status, created_at: m.created_at,
+        jobStatus: job?.status ?? null, artisanName: job?.artisan ? fullName(job.artisan) : null };
+    }),
+    upcomingInspections: (bookings.data ?? []).map((b: any) => ({
+      id: b.id, scheduledAt: b.scheduled_at, status: b.status, property: { title: b.properties?.title, area: b.properties?.area },
+      image: [...(b.properties?.property_media ?? [])].sort((x: any, y: any) => x.position - y.position)[0]?.url ?? null,
+      agentName: b.host ? fullName(b.host) : null,
+    })),
+    recentTransactions: tx.data,
   });
 });
 
@@ -124,22 +149,51 @@ r.get('/landlord/reports', requireRole('landlord', 'estate_manager'), async (req
 });
 
 /** Agent: bookings, revenue, properties, subscription. */
+/** Agent dashboard (Figma "AgentDashboard" 4548:23). */
 r.get('/agent', requireRole('agent', 'landlord', 'estate_manager'), async (req, res) => {
-  const [bk, props, esc, sub, wallet] = await Promise.all([
-    db.from('bookings').select('id, status, scheduled_at').eq('host_id', req.user.id),
-    db.from('properties').select('id, status').eq('owner_id', req.user.id).neq('status', 'archived'),
-    db.from('escrows').select('amount_kobo, fee_kobo, status').eq('payee_id', req.user.id).eq('kind', 'inspection'),
-    db.from('subscriptions').select('status, expires_at, subscription_plans(name, listing_limit)').eq('agent_id', req.user.id).eq('status', 'active').maybeSingle(),
-    db.from('wallets').select('available_kobo').eq('user_id', req.user.id).single(),
+  const uid = req.user.id;
+  const [bk, props, esc, sub, wallet, recent] = await Promise.all([
+    db.from('bookings').select('id, status, scheduled_at, created_at, property_id').eq('host_id', uid),
+    db.from('properties').select('id, title, status, price_kobo, price_period, property_media(url, position)').eq('owner_id', uid).neq('status', 'archived').order('created_at', { ascending: false }),
+    db.from('escrows').select('amount_kobo, fee_kobo, status, released_at').eq('payee_id', uid).eq('kind', 'inspection'),
+    db.from('subscriptions').select('status, starts_at, expires_at, subscription_plans(name, listing_limit)').eq('agent_id', uid).eq('status', 'active').maybeSingle(),
+    db.from('wallets').select('available_kobo').eq('user_id', uid).single(),
+    db.from('bookings').select('id, status, scheduled_at, properties(title, property_media(url, position)), tenant:profiles!bookings_tenant_id_fkey(first_name, last_name)')
+      .eq('host_id', uid).in('status', ['paid', 'confirmed', 'completed', 'cancelled']).order('scheduled_at', { ascending: false }).limit(5),
   ]);
   const b = bk.data ?? [];
+  const P = props.data ?? [];
+  const net = (e: any) => Number(e.amount_kobo) - Number(e.fee_kobo);
+  const released = (esc.data ?? []).filter((e) => e.status === 'released');
+  const mStart = new Date(monthStart());
+  const lastStart = new Date(mStart); lastStart.setMonth(lastStart.getMonth() - 1);
+  const thisMonth = sum(released.filter((e) => e.released_at && new Date(e.released_at) >= mStart), net);
+  const lastMonth = sum(released.filter((e) => e.released_at && new Date(e.released_at) >= lastStart && new Date(e.released_at) < mStart), net);
+  const weekAgo = Date.now() - 7 * 864e5;
+  const bookingsPer = new Map<string, number>();
+  for (const x of b) bookingsPer.set(x.property_id, (bookingsPer.get(x.property_id) ?? 0) + 1);
+  const cover = (m: any[] | null) => [...(m ?? [])].sort((x, y) => x.position - y.position)[0]?.url ?? null;
+  const approved = P.filter((p) => p.status === 'approved').length;
+  const limit = (sub.data as any)?.subscription_plans?.listing_limit ?? null;
+
   res.json({
-    revenueKobo: sum((esc.data ?? []).filter((e) => e.status === 'released'), (e) => Number(e.amount_kobo) - Number(e.fee_kobo)),
-    pendingRevenueKobo: sum((esc.data ?? []).filter((e) => e.status === 'held'), (e) => Number(e.amount_kobo) - Number(e.fee_kobo)),
+    revenueKobo: sum(released, net),
+    revenueThisMonthKobo: thisMonth,
+    revenueChangePct: lastMonth ? Math.round(((thisMonth - lastMonth) / lastMonth) * 100) : null,
+    pendingRevenueKobo: sum((esc.data ?? []).filter((e) => e.status === 'held'), net),
     walletKobo: wallet.data?.available_kobo ?? 0,
-    bookings: { total: b.length, upcoming: b.filter((x) => x.status === 'confirmed').length, completed: b.filter((x) => x.status === 'completed').length, awaitingOtp: b.filter((x) => x.status === 'paid').length },
-    listings: { total: props.data?.length ?? 0, approved: props.data?.filter((p) => p.status === 'approved').length ?? 0, pending: props.data?.filter((p) => p.status === 'pending').length ?? 0, rejected: props.data?.filter((p) => p.status === 'rejected').length ?? 0 },
-    subscription: sub.data, rating: { average: req.user.rating_avg, count: req.user.rating_count },
+    bookings: {
+      total: b.length, upcoming: b.filter((x) => x.status === 'confirmed').length, completed: b.filter((x) => x.status === 'completed').length,
+      awaitingOtp: b.filter((x) => x.status === 'paid').length, thisWeek: b.filter((x) => new Date(x.created_at).getTime() >= weekAgo).length,
+    },
+    listings: { total: P.length, approved, pending: P.filter((p) => p.status === 'pending').length, rejected: P.filter((p) => p.status === 'rejected').length },
+    subscription: sub.data ? { ...sub.data, usage: limit ? { used: approved, limit, percent: Math.min(100, Math.round((approved / limit) * 100)) } : null } : null,
+    rating: { average: req.user.rating_avg, count: req.user.rating_count },
+    recentBookings: (recent.data ?? []).map((x: any) => ({
+      id: x.id, status: x.status, scheduledAt: x.scheduled_at, propertyTitle: x.properties?.title ?? '', image: cover(x.properties?.property_media),
+      tenantName: x.tenant ? fullName(x.tenant) : null,
+    })),
+    topListings: P.slice(0, 6).map((p: any) => ({ id: p.id, title: p.title, status: p.status, priceKobo: p.price_kobo, pricePeriod: p.price_period, image: cover(p.property_media), bookings: bookingsPer.get(p.id) ?? 0 })),
   });
 });
 
@@ -190,6 +244,8 @@ r.get('/agent/analytics', requireRole('agent', 'landlord', 'estate_manager'), as
       bookings: counted.length, views: v.length,
     },
     statusCounts: Object.fromEntries(STATUSES.map((st) => [st, b.filter((x) => x.status === st).length])),
+    // Busiest days (Figma "Booking Analytics"): inspections per weekday, Mon..Sun, cancelled ones excluded.
+    weekdays: [1, 2, 3, 4, 5, 6, 0].map((d) => b.filter((x) => !['cancelled', 'expired', 'declined', 'refunded'].includes(x.status) && new Date(x.scheduled_at).getDay() === d).length),
     recentBookings: counted.slice(0, 30).map((x) => ({ id: x.id, status: x.status, scheduledAt: x.scheduled_at, amountKobo: Number(x.amount_kobo), property: x.properties?.title ?? null, area: x.properties?.area ?? null,
       tenant: x.tenant ? `${x.tenant.first_name ?? ''} ${x.tenant.last_name ?? ''}`.trim() : null, tenantAvatar: x.tenant?.avatar_url ?? null })),
     ledger: ledger.slice(0, 50),
@@ -201,31 +257,62 @@ r.get('/agent/analytics', requireRole('agent', 'landlord', 'estate_manager'), as
 });
 
 /** Artisan dashboard + earnings screen. */
+const weekStart = () => { const d = new Date(); const day = (d.getDay() + 6) % 7; d.setDate(d.getDate() - day); d.setHours(0, 0, 0, 0); return d.toISOString(); };
+const ACTIVE_JOB = ['assigned', 'diagnosing', 'awaiting_approval', 'approved', 'in_progress', 'awaiting_confirmation'];
+
+/** Artisan dashboard + Earnings (Figma 4579:3128 / 4579:2353). */
 r.get('/artisan', requireRole('artisan'), async (req, res) => {
-  const [ap, wallet, esc, jobs, wtx, alerts] = await Promise.all([
-    db.from('artisan_profiles').select('review_status, skill_category').eq('user_id', req.user.id).maybeSingle(),
-    db.from('wallets').select('available_kobo').eq('user_id', req.user.id).single(),
-    db.from('escrows').select('amount_kobo, fee_kobo, status, released_at, jobs(title, properties(area))').eq('payee_id', req.user.id).eq('kind', 'job'),
-    db.from('jobs').select('id, title, status, started_at, properties(title, area)').eq('artisan_id', req.user.id),
-    db.from('wallet_transactions').select('amount_kobo, created_at').eq('user_id', req.user.id).eq('kind', 'escrow_release').gte('created_at', `${lastMonths(6)[0]}-01`),
+  const uid = req.user.id;
+  const [ap, wallet, esc, jobs, wtx, alerts, pending, portfolio, certs, refs] = await Promise.all([
+    db.from('artisan_profiles').select('review_status, skill_category').eq('user_id', uid).maybeSingle(),
+    db.from('wallets').select('available_kobo').eq('user_id', uid).single(),
+    db.from('escrows').select('amount_kobo, fee_kobo, status, released_at, created_at, jobs(title, properties(area))').eq('payee_id', uid).eq('kind', 'job'),
+    db.from('jobs').select('id, title, status, started_at, completed_at, properties(title, area), landlord:profiles!jobs_landlord_id_fkey(first_name, last_name), job_reports(est_completion, created_at)').eq('artisan_id', uid),
+    db.from('wallet_transactions').select('amount_kobo, created_at').eq('user_id', uid).eq('kind', 'escrow_release').gte('created_at', `${lastMonths(6)[0]}-01`),
     db.from('jobs').select('id', { count: 'exact', head: true }).eq('status', 'open'),
+    db.from('job_quotes').select('id', { count: 'exact', head: true }).eq('artisan_id', uid).eq('status', 'pending'),
+    db.from('artisan_portfolio').select('id', { count: 'exact', head: true }).eq('user_id', uid),
+    db.from('artisan_documents').select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('doc_type', 'trade_certificate'),
+    db.from('artisan_references').select('id', { count: 'exact', head: true }).eq('user_id', uid),
   ]);
   const e = esc.data ?? [];
   const released = e.filter((x) => x.status === 'released');
+  const held = e.filter((x) => x.status === 'held');
   const net = (x: any) => Number(x.amount_kobo) - Number(x.fee_kobo);
   const j = jobs.data ?? [];
+  const wk = weekStart();
+
+  // Profile completeness: each item links to where it's fixed; the first missing one is offered as the next step.
+  const steps: [boolean, string][] = [
+    [!!req.user.avatar_url, 'Add a profile photo'],
+    [!!req.user.bio, 'Add a bio'],
+    [(portfolio.count ?? 0) > 0, 'Add portfolio photos'],
+    [(certs.count ?? 0) > 0, 'Add a certification'],
+    [(refs.count ?? 0) > 0, 'Add a reference'],
+  ];
+  const done = steps.filter(([ok]) => ok).length;
+
   res.json({
-    reviewStatus: ap.data?.review_status, rating: { average: req.user.rating_avg, count: req.user.rating_count },
+    reviewStatus: ap.data?.review_status, skillCategory: ap.data?.skill_category ?? null,
+    rating: { average: req.user.rating_avg, count: req.user.rating_count },
+    profile: { percent: Math.round((done / steps.length) * 100), nextStep: steps.find(([ok]) => !ok)?.[1] ?? null },
     earnings: {
       totalKobo: sum(released, net),
       thisMonthKobo: sum(released.filter((x) => x.released_at >= monthStart()), net),
-      escrowKobo: sum(e.filter((x) => x.status === 'held'), net),
+      thisWeekKobo: sum(released.filter((x) => x.released_at >= wk), net),
+      jobsThisWeek: j.filter((x) => x.status === 'completed' && (x.completed_at ?? '') >= wk).length,
+      escrowKobo: sum(held, net),
+      escrowJobs: held.length,
       walletKobo: wallet.data?.available_kobo ?? 0, jobsDone: j.filter((x) => x.status === 'completed').length,
       monthly: lastMonths(6).map((m) => ({ month: m, kobo: sum((wtx.data ?? []).filter((t) => monthKey(t.created_at) === m), (t) => Number(t.amount_kobo)) })),
-      recent: e.sort((a, b) => (b.released_at ?? '').localeCompare(a.released_at ?? '')).slice(0, 10),
+      recent: e.sort((a, b) => (b.released_at ?? b.created_at ?? '').localeCompare(a.released_at ?? a.created_at ?? '')).slice(0, 10),
     },
-    activeJobs: j.filter((x) => ['assigned', 'diagnosing', 'awaiting_approval', 'approved', 'in_progress', 'awaiting_confirmation'].includes(x.status)),
-    awaitingResponse: (await db.from('job_quotes').select('id', { count: 'exact', head: true }).eq('artisan_id', req.user.id).eq('status', 'pending')).count ?? 0,
+    activeJobs: j.filter((x) => ACTIVE_JOB.includes(x.status)).map((x: any) => {
+      const reports = (x.job_reports ?? []).sort((a: any, b: any) => (b.created_at ?? '').localeCompare(a.created_at ?? ''));
+      return { id: x.id, title: x.title, status: x.status, started_at: x.started_at, properties: x.properties,
+        landlordName: fullName(x.landlord ?? {}) || null, estCompletion: reports[0]?.est_completion ?? null };
+    }),
+    awaitingResponse: pending.count ?? 0,
     openJobsCount: alerts.count ?? 0,
   });
 });

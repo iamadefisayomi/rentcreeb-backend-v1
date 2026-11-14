@@ -8,6 +8,9 @@ import { createPayment } from '../services/payments';
 
 const r = Router();
 
+/** Yearly billing = 12 months less 20% (Figma "Plan Select Yearly"), rounded to the naira. */
+export const yearlyPrice = (monthlyKobo: number) => Math.round((monthlyKobo * 12 * 0.8) / 100) * 100;
+
 r.get('/plans', async (_req, res) =>
   res.json({ plans: (await db.from('subscription_plans').select('*').eq('active', true).order('price_kobo')).data }));
 
@@ -20,11 +23,12 @@ r.get('/current', authenticate, requireRole('agent'), async (req, res) => {
 
 /** Pay via Paystack → webhook activates the plan. */
 r.post('/checkout', authenticate, requireRole('agent'), requireVerified, async (req, res) => {
-  const { planId } = z.object({ planId: uuid }).parse(req.body);
+  const { planId, billing } = z.object({ planId: uuid, billing: z.enum(['monthly', 'yearly']).default('monthly') }).parse(req.body);
   const { data: plan } = await db.from('subscription_plans').select('*').eq('id', planId).eq('active', true).maybeSingle();
   if (!plan) throw notFound('Plan not found');
-  const sub = unwrap(await db.from('subscriptions').insert({ agent_id: req.user.id, plan_id: plan.id }).select().single());
-  const payment = await createPayment(req.user, 'subscription', Number(plan.price_kobo), { subscription_id: sub.id });
+  const amount = billing === 'yearly' ? yearlyPrice(Number(plan.price_kobo)) : Number(plan.price_kobo);
+  const sub = unwrap(await db.from('subscriptions').insert({ agent_id: req.user.id, plan_id: plan.id, billing_cycle: billing }).select().single());
+  const payment = await createPayment(req.user, 'subscription', amount, { subscription_id: sub.id });
   res.status(201).json({ subscription: sub, payment });
 });
 

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { db, unwrap } from '../lib/supabase';
+import { db, dbError, unwrap } from '../lib/supabase';
 import { badRequest, forbidden, notFound } from '../lib/errors';
 import { paginate } from '../lib/common';
 import { authenticate, requireRole, requirePhoneVerified } from '../middleware/auth';
@@ -8,25 +8,68 @@ import { notify } from '../services/notify';
 
 const r = Router();
 
+// ───────── Shared helpers ─────────
+const REVIEWER = 'reviewer:profiles!job_reviews_reviewer_id_fkey(first_name, last_name, role, avatar_url)';
+const PAGE = 10;
+
+/** Star breakdown over ALL of an artisan's reviews: { 5: n, 4: n, … } plus total and average. */
+async function ratingSummary(userId: string) {
+  const { data, error } = await db.from('job_reviews').select('rating').eq('reviewee_id', userId);
+  if (error) throw dbError(error);
+  const breakdown: Record<1 | 2 | 3 | 4 | 5, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  for (const x of data ?? []) breakdown[x.rating as 1 | 2 | 3 | 4 | 5]++;
+  const count = data?.length ?? 0;
+  const average = count ? Math.round(((data ?? []).reduce((a, x) => a + x.rating, 0) / count) * 10) / 10 : 0;
+  // "Top Rated": a strong average over enough reviews that it isn't luck.
+  return { count, average, breakdown, topRated: count >= 10 && average >= 4.5 };
+}
+
+/** "NABTEB_Certificate.pdf" → "NABTEB Certificate" — the public label for an uploaded trade certificate. */
+const certLabel = (name?: string | null) =>
+  (name ?? 'Trade certificate').replace(/\.[a-z0-9]+$/i, '').replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim() || 'Trade certificate';
+
 // ───────── Public ─────────
 r.get('/:id/public', async (req, res) => {
-  const [p, ap, port, reviews] = await Promise.all([
-    db.from('profiles').select('id, first_name, last_name, avatar_url, rating_avg, rating_count, nin_verified, created_at').eq('id', req.params.id).eq('role', 'artisan').maybeSingle(),
-    db.from('artisan_profiles').select('skill_category, additional_skills, service_areas, years_experience, bio, available').eq('user_id', req.params.id).eq('review_status', 'approved').maybeSingle(),
-    db.from('artisan_portfolio').select('id, url, caption').eq('user_id', req.params.id),
-    db.from('job_reviews').select('id, rating, comment, reply, created_at, reviewer:profiles!job_reviews_reviewer_id_fkey(first_name, last_name, role)').eq('reviewee_id', req.params.id).order('created_at', { ascending: false }).limit(20),
+  const id = req.params.id;
+  const [p, ap, port, reviews, certs, jobs, summary] = await Promise.all([
+    db.from('profiles').select('id, first_name, last_name, avatar_url, rating_avg, rating_count, nin_verified, created_at').eq('id', id).eq('role', 'artisan').maybeSingle(),
+    db.from('artisan_profiles').select('skill_category, additional_skills, service_areas, years_experience, bio, available, availability_hours').eq('user_id', id).eq('review_status', 'approved').maybeSingle(),
+    db.from('artisan_portfolio').select('id, url, caption').eq('user_id', id).order('created_at', { ascending: false }),
+    db.from('job_reviews').select(`id, rating, comment, reply, created_at, ${REVIEWER}`).eq('reviewee_id', id).order('created_at', { ascending: false }).limit(PAGE),
+    db.from('artisan_documents').select('id, original_name').eq('user_id', id).eq('doc_type', 'trade_certificate'),
+    db.from('jobs').select('landlord_id').eq('artisan_id', id).eq('status', 'completed'),
+    ratingSummary(id),
   ]);
   if (!p.data || !ap.data) throw notFound('Artisan not found');
-  const { count: jobs } = await db.from('jobs').select('id', { count: 'exact', head: true }).eq('artisan_id', req.params.id).eq('status', 'completed');
-  res.json({ artisan: { ...p.data, ...ap.data, jobsCompleted: jobs ?? 0 }, portfolio: port.data, reviews: reviews.data });
+  // Repeat clients = landlords who have completed more than one job with this artisan.
+  const perClient = new Map<string, number>();
+  for (const j of jobs.data ?? []) perClient.set(j.landlord_id, (perClient.get(j.landlord_id) ?? 0) + 1);
+  const repeatClients = [...perClient.values()].filter((n) => n > 1).length;
+  res.json({
+    artisan: { ...p.data, ...ap.data, jobsCompleted: jobs.data?.length ?? 0, repeatClients },
+    certifications: (certs.data ?? []).map((c) => ({ id: c.id, label: certLabel(c.original_name) })),
+    portfolio: port.data ?? [],
+    reviews: reviews.data ?? [],
+    summary,
+    hasMore: summary.count > PAGE,
+  });
+});
+
+/** "Load more reviews" on the public profile. */
+r.get('/:id/reviews', async (req, res) => {
+  const { page, limit, from, to } = paginate({ limit: PAGE, ...req.query });
+  const { data, count, error } = await db.from('job_reviews').select(`id, rating, comment, reply, created_at, ${REVIEWER}`, { count: 'exact' })
+    .eq('reviewee_id', req.params.id).order('created_at', { ascending: false }).range(from, to);
+  if (error) throw dbError(error);
+  res.json({ reviews: data ?? [], page, hasMore: (count ?? 0) > page * limit });
 });
 
 r.use(authenticate, requireRole('artisan'), requirePhoneVerified);
 
 // ───────── Registration steps 1–3 + 5 (step 4 = /verification/nin) ─────────
 const profileBody = z.object({
-  skillCategory: z.string().optional(), additionalSkills: z.array(z.string()).optional(),
-  serviceAreas: z.array(z.string()).optional(), yearsExperience: z.number().int().min(0).max(60).optional(),
+  skillCategory: z.string().optional(), additionalSkills: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  serviceAreas: z.array(z.string().trim().min(1).max(60)).max(25).optional(), yearsExperience: z.number().int().min(0).max(60).optional(),
   state: z.string().optional(), lga: z.string().optional(), homeAddress: z.string().optional(), bio: z.string().max(300).optional(),
 });
 r.put('/profile', async (req, res) => {
@@ -62,10 +105,32 @@ r.post('/portfolio', async (req, res) => {
 });
 r.delete('/portfolio/:id', async (req, res) => { await db.from('artisan_portfolio').delete().eq('id', req.params.id).eq('user_id', req.user.id); res.status(204).end(); });
 
+const SOCIAL = z.enum(['instagram', 'facebook', 'linkedin', 'x', 'tiktok', 'website']);
+const reference = z.object({
+  name: z.string().trim().min(3).max(80),
+  phone: z.string().trim().min(10).max(20),
+  email: z.string().trim().email().max(120).optional().or(z.literal('').transform(() => undefined)),
+  relationship: z.enum(['client', 'employer', 'colleague', 'supplier', 'landlord', 'other']).optional(),
+  company: z.string().trim().max(100).optional(),
+  jobTitle: z.string().trim().max(80).optional(),
+  yearsKnown: z.number().int().min(0).max(60).optional(),
+  socials: z.array(z.object({ platform: SOCIAL, handle: z.string().trim().min(1).max(200) })).max(6).default([]),
+  note: z.string().trim().max(300).optional(),
+  consent: z.literal(true, { errorMap: () => ({ message: 'Confirm each reference agreed to be contacted' }) }),
+});
+/** Replace the artisan's references. New rows are written before old ones are removed, so a failed write never loses data. */
 r.put('/references', async (req, res) => {
-  const { references } = z.object({ references: z.array(z.object({ name: z.string(), phone: z.string() })).max(5) }).parse(req.body);
-  await db.from('artisan_references').delete().eq('user_id', req.user.id);
-  if (references.length) await db.from('artisan_references').insert(references.map((x) => ({ ...x, user_id: req.user.id })));
+  const { references } = z.object({ references: z.array(reference).max(5) }).parse(req.body);
+  const old = unwrap(await db.from('artisan_references').select('id').eq('user_id', req.user.id)) ?? [];
+  if (references.length) {
+    const rows = references.map((x) => ({
+      user_id: req.user.id, name: x.name, phone: x.phone, email: x.email ?? null, relationship: x.relationship ?? null, company: x.company || null,
+      job_title: x.jobTitle || null, years_known: x.yearsKnown ?? null, socials: x.socials, note: x.note || null, consent: x.consent,
+    }));
+    const ins = await db.from('artisan_references').insert(rows);
+    if (ins.error) throw dbError(ins.error);
+  }
+  if (old.length) await db.from('artisan_references').delete().in('id', old.map((x: { id: string }) => x.id));
   res.status(204).end();
 });
 
@@ -91,10 +156,15 @@ r.patch('/availability', async (req, res) => {
   res.status(204).end();
 });
 
+/** My Reviews: a page of reviews plus (on page 1) the rating summary for the header card. */
 r.get('/reviews', async (req, res) => {
-  const { from, to } = paginate(req.query);
-  const { data } = await db.from('job_reviews').select('*, reviewer:profiles!job_reviews_reviewer_id_fkey(first_name, last_name, role), jobs(category)').eq('reviewee_id', req.user.id).order('created_at', { ascending: false }).range(from, to);
-  res.json({ reviews: data });
+  const { page, limit, from, to } = paginate(req.query);
+  const [list, summary] = await Promise.all([
+    db.from('job_reviews').select(`*, ${REVIEWER}, jobs(category, title)`, { count: 'exact' }).eq('reviewee_id', req.user.id).order('created_at', { ascending: false }).range(from, to),
+    page === 1 ? ratingSummary(req.user.id) : Promise.resolve(undefined),
+  ]);
+  if (list.error) throw dbError(list.error);
+  res.json({ reviews: list.data ?? [], summary, page, hasMore: (list.count ?? 0) > page * limit });
 });
 r.post('/reviews/:id/reply', async (req, res) => {
   const { reply } = z.object({ reply: z.string().min(1).max(1000) }).parse(req.body);

@@ -46,22 +46,39 @@ r.post('/:id/contribute', requireVerified, async (req, res) => {
 });
 
 /** Pay the currently due rent from saved funds (needs enough saved to cover the instalment). */
+/**
+ * Pay the currently due rent from saved funds (Figma "Pay Rent with RentSave" 4505:4675).
+ * Default: the whole instalment (savings must cover it). With `amountKobo`: a partial payment — the instalment is split
+ * and the remainder stays due.
+ */
 r.post('/:id/apply-to-rent', requireVerified, async (req, res) => {
-  const { tenancyId } = z.object({ tenancyId: uuid }).parse(req.body);
+  const { tenancyId, amountKobo } = z.object({ tenancyId: uuid, amountKobo: kobo.optional() }).parse(req.body);
   const { data: plan } = await db.from('rentsave_plans').select('*').eq('id', req.params.id).eq('tenant_id', req.user.id).maybeSingle();
   if (!plan) throw notFound('Plan not found');
   const { data: t } = await db.from('tenancies').select('id').eq('id', tenancyId).eq('tenant_id', req.user.id).eq('status', 'active').maybeSingle();
   if (!t) throw notFound('Active tenancy not found');
   const { data: due } = await db.from('rent_payments').select('*').eq('tenancy_id', t.id).in('status', ['due', 'overdue']).order('due_date').limit(1).maybeSingle();
   if (!due) throw badRequest('No rent currently due', 'NOTHING_DUE');
-  if (Number(plan.saved_kobo) < Number(due.amount_kobo)) throw badRequest('Your savings do not yet cover this rent', 'INSUFFICIENT_SAVINGS');
-  const { error } = await db.rpc('rentsave_debit', { p_plan: plan.id, p_amount: due.amount_kobo });
-  if (error) throw badRequest('Your savings do not yet cover this rent', 'INSUFFICIENT_SAVINGS');
-  if (!(await settleRent(due.id, null))) {
-    await db.rpc('rentsave_add', { p_plan: plan.id, p_amount: due.amount_kobo }); // already paid elsewhere: put the money back
+  const dueKobo = Number(due.amount_kobo);
+  const amount = amountKobo ?? dueKobo;
+  if (amount <= 0) throw badRequest('Enter an amount to apply', 'BAD_AMOUNT');
+  if (amount > dueKobo) throw badRequest('That is more than the rent currently due', 'BAD_AMOUNT');
+  if (Number(plan.saved_kobo) < amount) throw badRequest('Your savings do not cover that amount', 'INSUFFICIENT_SAVINGS');
+  const { error } = await db.rpc('rentsave_debit', { p_plan: plan.id, p_amount: amount });
+  if (error) throw badRequest('Your savings do not cover that amount', 'INSUFFICIENT_SAVINGS');
+  if (!(await settleRent(due.id, null, { amountKobo: amount }))) {
+    await db.rpc('rentsave_add', { p_plan: plan.id, p_amount: amount }); // already paid elsewhere: put the money back
     throw badRequest('This rent was already paid', 'ALREADY_PAID');
   }
-  res.json({ status: 'paid', paidKobo: due.amount_kobo });
+  res.json({ status: 'paid', paidKobo: amount, remainingKobo: dueKobo - amount });
+});
+
+/** Savings history (deposits) for the RentSave overview. */
+r.get('/:id/history', async (req, res) => {
+  const { data: plan } = await db.from('rentsave_plans').select('id').eq('id', req.params.id).eq('tenant_id', req.user.id).maybeSingle();
+  if (!plan) throw notFound('Plan not found');
+  const { data } = await db.from('payments').select('id, amount_kobo, paid_at, created_at, channel').eq('rentsave_plan_id', plan.id).eq('status', 'success').order('created_at', { ascending: false }).limit(30);
+  res.json({ deposits: data ?? [] });
 });
 
 export default r;

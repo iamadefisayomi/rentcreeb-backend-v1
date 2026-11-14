@@ -39,12 +39,43 @@ r.get('/verify/:reference', async (req, res) => {
 });
 
 /** Transaction history. ?purpose=inspection,subscription,... */
+/** Transaction History (Figma 4508:8120): a page of payments with a context line, plus (page 1) spend summary tiles. */
 r.get('/', async (req, res) => {
-  const { from, to } = paginate(req.query);
+  const { page, limit, from, to } = paginate(req.query);
   const purpose = typeof req.query.purpose === 'string' ? req.query.purpose.split(',') : null;
-  let q = db.from('payments').select('id, purpose, reference, amount_kobo, status, channel, paid_at, created_at').eq('user_id', req.user.id).order('created_at', { ascending: false }).range(from, to);
+  let q = db.from('payments').select('id, purpose, reference, amount_kobo, status, channel, paid_at, created_at, booking_id, tenancy_id, job_id, rentsave_plan_id, bookings(properties(title))', { count: 'exact' })
+    .eq('user_id', req.user.id).order('created_at', { ascending: false }).range(from, to);
   if (purpose) q = q.in('purpose', purpose);
-  res.json({ payments: (await q).data });
+  const { data, count } = await q;
+  const rows = (data ?? []) as any[];
+
+  // One context line per row: the property (booking / tenancy) or the job title.
+  const tenancyIds = [...new Set(rows.map((p) => p.tenancy_id).filter(Boolean))];
+  const jobIds = [...new Set(rows.map((p) => p.job_id).filter(Boolean))];
+  const [ten, jobs] = await Promise.all([
+    tenancyIds.length ? db.from('tenancies').select('id, properties(title)').in('id', tenancyIds) : Promise.resolve({ data: [] as any[] }),
+    jobIds.length ? db.from('jobs').select('id, title').in('id', jobIds) : Promise.resolve({ data: [] as any[] }),
+  ]);
+  const tenTitle = new Map((ten.data ?? []).map((t: any) => [t.id, t.properties?.title]));
+  const jobTitle = new Map((jobs.data ?? []).map((j: any) => [j.id, j.title]));
+  const payments = rows.map(({ bookings, ...p }) => ({
+    ...p,
+    subtitle: bookings?.properties?.title ?? (p.tenancy_id ? tenTitle.get(p.tenancy_id) : null) ?? (p.job_id ? jobTitle.get(p.job_id) : null) ?? (p.purpose === 'rentsave' ? 'RentSave wallet' : null),
+  }));
+
+  let summary: { totalSpentKobo: number; thisMonthKobo: number; pendingKobo: number } | undefined;
+  if (page === 1) {
+    const { data: all } = await db.from('payments').select('amount_kobo, status, paid_at, created_at').eq('user_id', req.user.id).in('status', ['success', 'pending']);
+    const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+    const ok = (all ?? []).filter((p) => p.status === 'success');
+    summary = {
+      totalSpentKobo: ok.reduce((s, p) => s + Number(p.amount_kobo), 0),
+      thisMonthKobo: ok.filter((p) => new Date(p.paid_at ?? p.created_at) >= monthStart).reduce((s, p) => s + Number(p.amount_kobo), 0),
+      // Abandoned Paystack checkouts stay 'pending' forever — only count recent ones.
+      pendingKobo: (all ?? []).filter((p) => p.status === 'pending' && Date.now() - new Date(p.created_at).getTime() < 864e5).reduce((s, p) => s + Number(p.amount_kobo), 0),
+    };
+  }
+  res.json({ payments, summary, page, hasMore: (count ?? 0) > page * limit });
 });
 
 async function ownPayment(id: string, userId: string) {
