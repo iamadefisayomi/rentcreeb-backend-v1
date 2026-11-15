@@ -1,3 +1,4 @@
+import path from 'path';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -40,6 +41,16 @@ export function createApp() {
   app.use(express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
+
+  // Admin dashboard (static files in backend/admin). It calls /api/v1/admin/* on this same origin, so no CORS.
+  // Own CSP: scripts/styles only from here; images from https (listing photos, avatars, evidence on the CDN).
+  app.use('/admin', helmet({
+    contentSecurityPolicy: { directives: {
+      defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'"], frameAncestors: ["'none'"], formAction: ["'self'"], objectSrc: ["'none'"], baseUri: ["'self'"],
+    } },
+    referrerPolicy: { policy: 'no-referrer' },
+  }), express.static(path.resolve(__dirname, '..', 'admin'), { index: 'index.html', maxAge: '5m' }));
 
   const general = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false });
   const strict = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
