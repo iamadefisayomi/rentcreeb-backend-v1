@@ -4,6 +4,8 @@ import { env } from './config/env';
 import { logger } from './lib/logger';
 import { startScheduler } from './jobs/scheduler';
 import { checkBytidCredentials } from './lib/bytid';
+import { checkSmsCredentials } from './lib/sms';
+import { warnIfNoTurn } from './routes/calls.routes';
 
 const app = createApp();
 
@@ -18,6 +20,9 @@ const server = app.listen(PORT, HOST, () => {
   } catch (err) {
     logger.error({ err }, 'Failed to start scheduler');
   }
+
+  void checkSmsCredentials();
+  warnIfNoTurn();
 
   void checkBytidCredentials().catch((err) => {
     logger.error({ err }, 'Bytid credential check failed');

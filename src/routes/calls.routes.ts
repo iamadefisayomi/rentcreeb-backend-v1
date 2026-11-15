@@ -6,6 +6,7 @@ import { badRequest, forbidden, notFound } from '../lib/errors';
 import { fullName } from '../lib/common';
 import { authenticate } from '../middleware/auth';
 import { notify } from '../services/notify';
+import { logger } from '../lib/logger';
 
 /**
  * In-app voice/video calls between the two people in a conversation.
@@ -25,13 +26,46 @@ type Call = {
   offer: unknown; answer: unknown; end_reason: string | null; created_at: string; answered_at: string | null; ended_at: string | null;
 };
 
-export function iceServers() {
-  const list: { urls: string[]; username?: string; credential?: string }[] = [];
+type Ice = { urls: string[]; username?: string; credential?: string };
+let cfCache: { at: number; list: Ice[] } | null = null;
+
+/** Short-lived TURN credentials from Cloudflare (free up to 1,000 GB/month). Cached for 10 minutes; creds live 4 hours. */
+async function cloudflareTurn(): Promise<Ice[]> {
+  if (!env.CF_TURN_KEY_ID || !env.CF_TURN_API_TOKEN) return [];
+  if (cfCache && Date.now() - cfCache.at < 10 * 60_000) return cfCache.list;
+  try {
+    const res = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate-ice-servers`, {
+      method: 'POST', headers: { Authorization: `Bearer ${env.CF_TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl: 4 * 60 * 60 }), signal: AbortSignal.timeout(8_000),
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (!res.ok) { logger.error({ status: res.status, errors: json?.errors }, 'Cloudflare TURN credentials request failed'); return cfCache?.list ?? []; }
+    const raw = Array.isArray(json.iceServers) ? json.iceServers : json.iceServers ? [json.iceServers] : [];
+    const list: Ice[] = raw.map((x: any) => ({ urls: Array.isArray(x.urls) ? x.urls : [x.urls], username: x.username, credential: x.credential }))
+      // Port 53 is often blocked by networks/browsers; keep 3478, 80 and 443 (TLS) routes.
+      .map((x: Ice) => ({ ...x, urls: x.urls.filter((u) => !/:53(\?|$)/.test(u)) })).filter((x: Ice) => x.urls.length);
+    cfCache = { at: Date.now(), list };
+    return list;
+  } catch (err) {
+    logger.warn({ err }, 'Cloudflare TURN unreachable');
+    return cfCache?.list ?? [];
+  }
+}
+
+export async function iceServers() {
+  const list: Ice[] = [];
   const stun = env.STUN_URLS.split(',').map((x) => x.trim()).filter(Boolean);
   if (stun.length) list.push({ urls: stun });
   const turn = (env.TURN_URLS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   if (turn.length) list.push({ urls: turn, username: env.TURN_USERNAME, credential: env.TURN_CREDENTIAL });
+  list.push(...(await cloudflareTurn()));
   return list;
+}
+
+/** Logged once at startup: calls between phones on Nigerian mobile data rarely connect without a TURN relay. */
+export function warnIfNoTurn() {
+  if (!env.TURN_URLS && !(env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN))
+    logger.warn('No TURN relay configured (CF_TURN_KEY_ID/CF_TURN_API_TOKEN or TURN_URLS): calls on mobile data will often fail to connect');
 }
 
 const label = (kind: string) => (kind === 'video' ? 'video call' : 'voice call');
@@ -77,7 +111,7 @@ async function withParties(c: Call, userId: string) {
   return { ...c, role: c.caller_id === userId ? 'caller' : 'callee', other };
 }
 
-r.get('/config', (_req, res) => { res.json({ iceServers: iceServers(), ringSeconds: RING_SECONDS }); });
+r.get('/config', async (_req, res) => { res.json({ iceServers: await iceServers(), ringSeconds: RING_SECONDS }); });
 
 /** Start a call to the other person in a conversation. */
 r.post('/', async (req, res) => {
@@ -101,7 +135,7 @@ r.post('/', async (req, res) => {
 
   const call = unwrap(await db.from('calls').insert({ conversation_id: conv.id, caller_id: req.user.id, callee_id: callee, kind: b.kind }).select('*').single()) as Call;
   await notify(callee, 'incoming_call', `Incoming ${label(b.kind)}`, `${fullName(req.user) || 'Someone'} is calling you on RentCreeb`, { callId: call.id, kind: b.kind });
-  res.status(201).json({ call: await withParties(call, req.user.id), iceServers: iceServers(), ringSeconds: RING_SECONDS });
+  res.status(201).json({ call: await withParties(call, req.user.id), iceServers: await iceServers(), ringSeconds: RING_SECONDS });
 });
 
 /** The newest call ringing for me right now (the app polls this while open). */
@@ -116,7 +150,7 @@ r.get('/incoming', async (req, res) => {
 
 r.get('/:id', async (req, res) => {
   const c = await load(req.params.id, req.user.id);
-  res.json({ call: await withParties(c, req.user.id), iceServers: iceServers(), ringSeconds: RING_SECONDS });
+  res.json({ call: await withParties(c, req.user.id), iceServers: await iceServers(), ringSeconds: RING_SECONDS });
 });
 
 /** Caller: store the SDP offer (complete, with ICE candidates). */

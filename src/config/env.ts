@@ -16,6 +16,11 @@ const schema = z.object({
 
   OTP_PEPPER: z.string().min(16),
 
+  // SMS via SmartSMS Nigeria's JSON API (smartsms.ng). Username = your login email; API key from the dashboard.
+  SMARTSMS_USERNAME: z.string().optional(),
+  SMARTSMS_API_KEY: z.string().optional(),
+  SMARTSMS_SENDER_ID: z.string().max(11).default('RentCreeb'),
+  // Fallback provider: Africa's Talking (used only if SMARTSMS_TOKEN is not set).
   AT_USERNAME: z.string().default('sandbox'),
   AT_API_KEY: z.string().optional(),
   AT_SENDER_ID: z.string().optional(),
@@ -54,6 +59,9 @@ const schema = z.object({
   TURN_URLS: z.string().optional(),
   TURN_USERNAME: z.string().optional(),
   TURN_CREDENTIAL: z.string().optional(),
+  // Cloudflare Realtime TURN (recommended): dashboard → Realtime → TURN Server → create key.
+  CF_TURN_KEY_ID: z.string().optional(),
+  CF_TURN_API_TOKEN: z.string().optional(),
 
   INSPECTION_FEE_KOBO: z.coerce.number().default(500000),
   INSPECTION_PLATFORM_FEE_PCT: z.coerce.number().default(10),

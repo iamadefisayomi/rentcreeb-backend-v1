@@ -7,7 +7,7 @@ Express 5 + TypeScript backend for the RentCreeb React Native app.
 |---|---|
 | Auth | Supabase Auth (email/password, Google/Apple via `signInWithIdToken` in the app). Express verifies the Supabase JWT |
 | NIN + selfie | Bytid (face match) |
-| SMS OTP | Africa's Talking |
+| SMS OTP | SmartSMS (smartsms.ng); Africa's Talking fallback |
 | Payments / escrow / payouts | Paystack (REST, no SDK) |
 | Media | Bunny Storage — public zone + private token-protected zone for IDs/certificates |
 | Chat | Messages written through the API; app subscribes to Supabase Realtime for live updates |
