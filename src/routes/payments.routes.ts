@@ -1,3 +1,4 @@
+import { env } from '../config/env';
 import { Router } from 'express';
 import PDFDocument from 'pdfkit';
 import { db } from '../lib/supabase';
@@ -142,6 +143,10 @@ r.get('/:id/receipt.pdf', async (req, res) => {
     ...(ctx.property ? [['Property', `${ctx.property.title}, ${ctx.property.address}`] as [string, string]] : []),
     ...(ctx.counterparty ? [[ctx.counterpartyRole ?? 'Paid to', ctx.counterparty] as [string, string]] : []),
     ['Amount', `NGN ${(Number(p.amount_kobo) / 100).toLocaleString('en-NG', { minimumFractionDigits: 2 })}`],
+    // VAT is included in RentCreeb's own service fees (residential rent is VAT-exempt).
+    ...(env.VAT_PCT > 0 && ['inspection', 'subscription'].includes(p.purpose)
+      ? [[`VAT (${env.VAT_PCT}%, included)`, `NGN ${((Number(p.amount_kobo) - Number(p.amount_kobo) / (1 + env.VAT_PCT / 100)) / 100).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`] as [string, string]]
+      : []),
     ['Status', p.status], ['Channel', p.channel ?? '-'], ['Date', new Date(p.paid_at ?? p.created_at).toLocaleString('en-NG')],
   ];
   rows.forEach(([k, v]) => doc.fontSize(11).fillColor('#666').text(k, { continued: true }).fillColor('#000').text(`   ${v}`).moveDown(0.4));

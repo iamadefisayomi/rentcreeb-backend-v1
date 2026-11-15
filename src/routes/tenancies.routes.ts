@@ -156,6 +156,15 @@ r.get('/', async (req, res) => {
   res.json({ tenancies: list, counts });
 });
 
+/** Documents the tenant chose to share with the landlord of this tenancy. */
+r.get('/:id/documents', async (req, res) => {
+  const t = await getTenancy(String(req.params.id), req.user.id);
+  mustManage(t, req.user.id);
+  const { data, error } = await db.from('user_documents').select('id, title, category, mime_type, size_bytes, created_at')
+    .eq('tenancy_id', t.id).eq('shared_with_landlord', true).order('created_at', { ascending: false });
+  res.json({ documents: error ? [] : data }); // empty before migration 012
+});
+
 r.get('/:id', async (req, res) => {
   const t = await getTenancy(String(req.params.id), req.user.id);
   const [{ data: payments }, { data: maintenance }, { data: reminders }] = await Promise.all([

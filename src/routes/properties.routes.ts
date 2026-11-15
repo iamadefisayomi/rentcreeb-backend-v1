@@ -6,10 +6,12 @@ import { kobo, paginate, uuid } from '../lib/common';
 import { authenticate, optionalAuth, requireRole, requireVerified } from '../middleware/auth';
 import { deleteFromBunny, signPrivateUrl } from '../lib/bunny';
 import { env } from '../config/env';
+import { responseTime } from '../services/responseTime';
 
 const r = Router();
 const LISTER_ROLES = ['agent', 'landlord', 'estate_manager'] as const;
-const CARD = 'id, title, address, area, city, price_kobo, price_period, property_type, bedrooms, bathrooms, size_sqm, parking, is_verified, status, owner_id, property_media(url, media_type, position)';
+// '*' so new listing columns (land / commercial, migration 012) appear without breaking search before the migration runs.
+const CARD = '*, property_media(url, media_type, position)';
 
 const mediaItem = z.object({ url: z.string().url(), type: z.enum(['image', 'video']).default('image') });
 const unitBody = z.object({
@@ -31,7 +33,7 @@ const propertyBody = z.object({
   title: z.string().min(3), description: z.string().optional(), address: z.string().min(5),
   area: z.string().optional(), city: z.string().default('Lagos'), state: z.string().default('Lagos'),
   lat: z.number().optional(), lng: z.number().optional(),
-  priceKobo: kobo, pricePeriod: z.enum(['year', 'month']).default('year'),
+  priceKobo: kobo, pricePeriod: z.enum(['year', 'month', 'outright']).default('year'), // outright = sale price (land)
   propertyType: z.string().default('apartment'),
   bedrooms: z.number().int().min(0).default(0), bathrooms: z.number().int().min(0).default(0),
   sizeSqm: z.number().positive().optional(), parking: z.boolean().default(false),
@@ -39,6 +41,8 @@ const propertyBody = z.object({
   parkingSpaces: z.number().int().min(0).max(50).optional(), yearBuilt: z.number().int().min(1900).max(2100).optional(),
   landmark: z.string().trim().max(120).optional(), cautionFeeKobo: kobo.optional(), agencyFeeKobo: kobo.optional(),
   securityFeatures: z.array(z.string().max(40)).max(12).optional(),
+  /** Land: title document and number of plots. Commercial: intended use. */
+  titleDocument: z.string().trim().max(80).optional(), plotCount: z.number().positive().max(10000).optional(), commercialUse: z.string().trim().max(80).optional(),
   media: z.array(mediaItem).max(30).default([]),
   /** false = private/managed property (landlord tools only), never shown in search */
   publish: z.boolean().default(true),
@@ -54,6 +58,7 @@ const row = (b: z.infer<typeof propertyBody>) => ({
   inspection_fee_kobo: b.inspectionFeeKobo,
   parking_spaces: b.parkingSpaces, year_built: b.yearBuilt, landmark: b.landmark,
   caution_fee_kobo: b.cautionFeeKobo, agency_fee_kobo: b.agencyFeeKobo, security_features: b.securityFeatures,
+  title_document: b.titleDocument, plot_count: b.plotCount, commercial_use: b.commercialUse,
 });
 
 async function assertOwner(propertyId: string, userId: string) {
@@ -263,18 +268,19 @@ r.get('/:id', optionalAuth, async (req, res) => {
   if (!p || (!isOwner && !['approved', 'rented'].includes(p.status))) throw notFound('Property not found');
   if (!isOwner) void db.from('property_views').insert({ property_id: p.id, viewer_id: req.user?.id ?? null }).then(() => undefined, () => undefined);
 
-  const [owner, listings, stats, similar] = await Promise.all([
+  const [owner, listings, stats, similar, rt] = await Promise.all([
     db.from('profiles').select('id, first_name, last_name, avatar_url, role, rating_avg, rating_count, nin_verified, created_at').eq('id', p.owner_id).single(),
     db.from('properties').select('id', { count: 'exact', head: true }).eq('owner_id', p.owner_id).eq('status', 'approved'),
     db.from('reviews').select('rating').eq('property_id', p.id).eq('hidden', false),
     db.from('properties').select(CARD).eq('status', 'approved').neq('id', p.id)
       .or(`area.eq."${String(p.area ?? '').replace(/"/g, '')}",property_type.eq."${String(p.property_type).replace(/"/g, '')}"`).limit(8),
+    responseTime(p.owner_id).catch(() => null),
   ]);
   const ratings = (stats.data ?? []).map((x) => x.rating);
   res.json({
     // Effective inspection fee (listing override or the platform default) so the booking summary can show it up front.
     property: { ...p, inspection_fee_kobo: Number(p.inspection_fee_kobo ?? env.INSPECTION_FEE_KOBO), property_media: (p.property_media ?? []).sort((a: any, b: any) => a.position - b.position) },
-    agent: { ...owner.data, listingsCount: listings.count ?? 0 },
+    agent: { ...owner.data, listingsCount: listings.count ?? 0, responseTime: rt },
     reviewsSummary: { count: ratings.length, average: ratings.length ? +(ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1) : 0 },
     similar: similar.data,
   });

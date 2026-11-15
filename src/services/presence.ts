@@ -5,7 +5,7 @@
  * never touches the database. This assumes a single API instance (the Render web service); if the API
  * is ever scaled out, move these maps to Redis or Supabase Realtime presence.
  */
-const ONLINE_MS = 25_000; // the app pings at least every few seconds while open (call watcher, chat polls)
+const ONLINE_MS = 45_000; // the app talks to the API at least every ~20s while open (call watcher, chat)
 const TYPING_MS = 6_000; // a typing ping lasts this long unless refreshed or cleared
 
 const lastSeen = new Map<string, number>();

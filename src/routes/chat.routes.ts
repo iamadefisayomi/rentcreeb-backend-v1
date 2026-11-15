@@ -5,6 +5,8 @@ import { forbidden, notFound, badRequest } from '../lib/errors';
 import { fullName } from '../lib/common';
 import { authenticate } from '../middleware/auth';
 import { notify } from '../services/notify';
+import { signPrivateUrl } from '../lib/bunny';
+import { logger } from '../lib/logger';
 import { isTyping, presenceOf, setTyping } from '../services/presence';
 import { PRIVACY_DEFAULTS } from './support.routes';
 
@@ -41,7 +43,7 @@ r.get('/', async (req, res) => {
     '*, a:profiles!conversations_participant_a_fkey(id, first_name, last_name, avatar_url), b:profiles!conversations_participant_b_fkey(id, first_name, last_name, avatar_url)')
     .or(`participant_a.eq.${req.user.id},participant_b.eq.${req.user.id}`);
   const out = await Promise.all((convs ?? []).map(async (c: any) => {
-    const { data: last } = await db.from('messages').select('body, attachment_url, created_at, sender_id').eq('conversation_id', c.id).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const { data: last } = await db.from('messages').select('*').eq('conversation_id', c.id).order('created_at', { ascending: false }).limit(1).maybeSingle();
     const { count } = await db.from('messages').select('id', { count: 'exact', head: true }).eq('conversation_id', c.id).neq('sender_id', req.user.id).is('read_at', null);
     return { id: c.id, contextType: c.context_type, contextId: c.context_id, other: c.participant_a === req.user.id ? c.b : c.a, lastMessage: last, unreadCount: count ?? 0 };
   }));
@@ -61,7 +63,17 @@ r.get('/:id', async (req, res) => {
 });
 
 /** The quoted message shown above a reply. */
-const REPLY_EMBED = 'reply_to:messages!messages_reply_to_id_fkey(id, body, attachment_url, sender_id)';
+const REPLY_EMBED = 'reply_to:messages!messages_reply_to_id_fkey(id, body, attachment_url, attachment_name, attachment_type, sender_id)';
+const SIGNED_TTL = 60 * 60; // attachment links last an hour; the app re-fetches messages when it needs fresh ones
+
+/** Private chat files are stored by path; swap in a short-lived signed URL for the app. */
+export function withSignedAttachment<T extends { attachment_path?: string | null; attachment_url?: string | null }>(m: T): T {
+  if (!m?.attachment_path) return m;
+  try { return { ...m, attachment_url: signPrivateUrl(m.attachment_path, SIGNED_TTL) }; }
+  catch (err) { logger.error({ err }, 'could not sign chat attachment'); return m; }
+}
+const attachmentLabel = (m: { attachment_type?: string | null; attachment_name?: string | null }) =>
+  m.attachment_type?.startsWith('image/') ? '📷 Photo' : `📎 ${m.attachment_name ?? 'File'}`;
 
 r.get('/:id/messages', async (req, res) => {
   await getConv(req.params.id, req.user.id);
@@ -74,26 +86,42 @@ r.get('/:id/messages', async (req, res) => {
   let r1 = await page(`*, ${REPLY_EMBED}`);
   // Before migration 010 the reply relation doesn't exist yet: fall back to plain messages instead of an empty chat.
   if (r1.error) r1 = await page('*');
-  res.json({ messages: r1.data ?? [] });
+  res.json({ messages: ((r1.data ?? []) as any[]).map((m) => withSignedAttachment({ ...m, reply_to: m.reply_to ? withSignedAttachment(m.reply_to) : m.reply_to })) });
 });
 
 r.post('/:id/messages', async (req, res) => {
   const c = await getConv(req.params.id, req.user.id);
-  const b = z.object({ body: z.string().max(4000).optional(), attachmentUrl: z.string().url().optional(), replyToId: z.string().uuid().optional() }).parse(req.body);
-  if (!b.body && !b.attachmentUrl) throw badRequest('Empty message');
+  const b = z.object({
+    body: z.string().max(4000).optional(), attachmentUrl: z.string().url().optional(), replyToId: z.string().uuid().optional(),
+    // Private upload from POST /uploads?folder=chat-files — must be the sender's own file.
+    attachment: z.object({
+      path: z.string().startsWith(`chat-files/${req.user.id}/`).max(500), name: z.string().trim().min(1).max(200),
+      type: z.string().max(120), size: z.number().int().min(0).max(50 * 1024 * 1024),
+    }).optional(),
+  }).parse(req.body);
+  if (!b.body?.trim() && !b.attachmentUrl && !b.attachment) throw badRequest('Empty message');
   let quoted: { id: string; body: string | null; attachment_url: string | null; sender_id: string } | null = null;
   if (b.replyToId) {
     const { data } = await db.from('messages').select('id, body, attachment_url, sender_id, conversation_id').eq('id', b.replyToId).maybeSingle();
     if (!data || data.conversation_id !== c.id) throw badRequest('You can only reply to a message in this chat', 'BAD_REPLY');
     quoted = { id: data.id, body: data.body, attachment_url: data.attachment_url, sender_id: data.sender_id };
   }
-  const row: Record<string, unknown> = { conversation_id: c.id, sender_id: req.user.id, body: b.body, attachment_url: b.attachmentUrl };
+  const row: Record<string, unknown> = { conversation_id: c.id, sender_id: req.user.id, body: b.body?.trim() || null, attachment_url: b.attachmentUrl };
   if (quoted) row.reply_to_id = quoted.id; // only touch the column when replying, so plain messages work before migration 010
-  const msg = { ...unwrap(await db.from('messages').insert(row).select().single()), reply_to: quoted };
+  if (b.attachment) Object.assign(row, { attachment_path: b.attachment.path, attachment_name: b.attachment.name, attachment_type: b.attachment.type, attachment_size: b.attachment.size });
+  const msg = withSignedAttachment({ ...unwrap(await db.from('messages').insert(row).select().single()), reply_to: quoted });
   setTyping(c.id, req.user.id, false);
   const other = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
-  await notify(other, 'message', fullName(req.user) || 'New message', b.body?.slice(0, 100) ?? '📎 Attachment', { conversationId: c.id });
+  const preview = b.body?.trim() ? b.body.trim().slice(0, 100) : b.attachment ? attachmentLabel({ attachment_type: b.attachment.type, attachment_name: b.attachment.name }) : '📎 Attachment';
+  await notify(other, 'message', fullName(req.user) || 'New message', preview, { conversationId: c.id });
   res.status(201).json({ message: msg });
+});
+
+r.get('/:id/messages/:messageId', async (req, res) => {
+  await getConv(req.params.id, req.user.id);
+  const { data } = await db.from('messages').select('*').eq('id', req.params.messageId).eq('conversation_id', req.params.id).maybeSingle();
+  if (!data) throw badRequest('Message not found', 'NOT_FOUND');
+  res.json({ message: withSignedAttachment(data) });
 });
 
 const showsActivity = (prefs: unknown) => ((prefs as Record<string, unknown> | null)?.activity_status ?? PRIVACY_DEFAULTS.activity_status) !== false;

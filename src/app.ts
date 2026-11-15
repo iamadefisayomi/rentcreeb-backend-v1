@@ -30,6 +30,7 @@ import artisanRoutes from './routes/artisan.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import adminRoutes from './routes/admin.routes';
 import supportRoutes from './routes/support.routes';
+import documentsRoutes from './routes/documents.routes';
 
 export function createApp() {
   const app = express();
@@ -59,6 +60,14 @@ export function createApp() {
   app.use(general);
 
   const v1 = express.Router();
+  /**
+   * Public client config. The Supabase URL + anon key are public by design (Row Level Security protects data);
+   * the app uses them for Realtime with the user's own access token.
+   */
+  v1.get('/config', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({ realtime: { url: env.SUPABASE_URL, anonKey: env.SUPABASE_ANON_KEY }, vatPct: env.VAT_PCT });
+  });
   v1.use('/auth', strict, authRoutes);
   v1.use('/users', usersRoutes);
   v1.use('/verification', verificationRoutes);
@@ -80,6 +89,7 @@ export function createApp() {
   v1.use('/artisan', artisanRoutes);
   v1.use('/dashboard', dashboardRoutes);
   v1.use('/support', supportRoutes);
+  v1.use('/documents', documentsRoutes);
   v1.use('/admin', adminRoutes);
   app.use('/api/v1', (_req, res, next) => (env.MAINTENANCE_MODE
     ? res.status(503).json({ error: { code: 'MAINTENANCE', message: 'RentCreeb is under maintenance. Please try again shortly.' } })

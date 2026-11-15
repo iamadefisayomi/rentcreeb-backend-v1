@@ -44,6 +44,8 @@ const schema = z.object({
   /** Inbox that receives Contact Support / Report a Bug submissions (optional; tickets are always stored). */
   SUPPORT_EMAIL: z.string().email().optional(),
 
+  /** VAT shown (as included in the price) on RentCreeb's own fees: subscriptions and inspection fees. 0 hides the line. */
+  VAT_PCT: z.coerce.number().min(0).max(50).default(7.5),
   /** In-app calls: STUN servers (comma-separated) and an optional TURN relay for callers behind strict NATs. */
   STUN_URLS: z.string().default('stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302'),
   TURN_URLS: z.string().optional(),

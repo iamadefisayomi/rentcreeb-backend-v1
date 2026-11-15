@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { responseTime } from '../services/responseTime';
 import { db, unwrap } from '../lib/supabase';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors';
 import { authenticate } from '../middleware/auth';
@@ -96,7 +97,9 @@ r.put('/me/push-token', authenticate, async (req, res) => {
 r.get('/:id', async (req, res) => {
   const { data } = await db.from('profiles').select(PUBLIC_COLS).eq('id', req.params.id).maybeSingle();
   if (!data) throw notFound('User not found');
-  res.json({ profile: data });
+  // Chat reply speed for people tenants message about listings.
+  const rt = ['agent', 'landlord', 'estate_manager'].includes((data as any).role) ? await responseTime((data as any).id).catch(() => null) : null;
+  res.json({ profile: { ...(data as object), responseTime: rt } });
 });
 
 export default r;
