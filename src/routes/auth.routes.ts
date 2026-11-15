@@ -178,6 +178,59 @@ r.post('/social', async (req, res) => {
   });
 });
 
+/**
+ * Browser-based OAuth through Supabase (works in Expo Go, unlike Google's native flow, which rejects exp:// redirects).
+ * 1) /oauth/start returns Supabase's authorize URL (PKCE: the app keeps the verifier, sends only the challenge).
+ * 2) Google sends the user back to Supabase's own https callback, which redirects to the app with ?code=…
+ * 3) /oauth/finish swaps code + verifier for a session and fills in the profile from the Google account.
+ */
+// Only the app may receive the code: Expo Go (exp://…) in development, the app scheme in builds.
+const APP_REDIRECT = /^(exp|exps):\/\/[^\s]+$|^rentcreeb:\/\/[^\s]*$/;
+
+r.post('/oauth/start', async (req, res) => {
+  const b = z.object({
+    provider: z.enum(['google']),
+    redirectTo: z.string().max(500).refine((u) => APP_REDIRECT.test(u), 'Unsupported redirect'),
+    codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
+  }).parse(req.body);
+  const url = new URL(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/authorize`);
+  url.searchParams.set('provider', b.provider);
+  url.searchParams.set('redirect_to', b.redirectTo);
+  url.searchParams.set('code_challenge', b.codeChallenge);
+  url.searchParams.set('code_challenge_method', 's256');
+  res.json({ url: url.toString() });
+});
+
+r.post('/oauth/finish', async (req, res) => {
+  const b = z.object({ code: z.string().min(10).max(500), codeVerifier: z.string().regex(/^[A-Za-z0-9_~.-]{43,128}$/) }).parse(req.body);
+  const r1 = await fetch(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/token?grant_type=pkce`, {
+    method: 'POST', headers: { apikey: env.SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auth_code: b.code, code_verifier: b.codeVerifier }),
+  });
+  const session: any = await r1.json().catch(() => null);
+  if (!r1.ok || !session?.access_token || !session?.user) throw unauthorized('Google sign-in could not be completed. Please try again.');
+  const u = session.user;
+  // The signup trigger reads first/last name from metadata; Google sends given/family/full name instead.
+  const meta = u.user_metadata ?? {};
+  const full = String(meta.full_name ?? meta.name ?? '').trim();
+  const first = meta.given_name ?? meta.first_name ?? (full ? full.split(/\s+/)[0] : null);
+  const last = meta.family_name ?? meta.last_name ?? (full.includes(' ') ? full.split(/\s+/).slice(1).join(' ') : null);
+  const { data: existing } = await db.from('profiles').select('*').eq('id', u.id).maybeSingle();
+  if (!existing) throw unauthorized('Your account could not be created. Please try again.');
+  const patch: Record<string, unknown> = {};
+  if (!existing.first_name && first) patch.first_name = first;
+  if (!existing.last_name && last) patch.last_name = last;
+  if (!existing.avatar_url && (meta.avatar_url || meta.picture)) patch.avatar_url = meta.avatar_url ?? meta.picture;
+  if (!existing.email && u.email) patch.email = u.email;
+  const profile = Object.keys(patch).length ? unwrap(await db.from('profiles').update(patch).eq('id', u.id).select('*').single()) : existing;
+  const isNewUser = Date.now() - Date.parse(u.created_at) < 5 * 60 * 1000 && !profile.onboarding_completed;
+  res.json({
+    profile,
+    session: { access_token: session.access_token, refresh_token: session.refresh_token, expires_in: session.expires_in, expires_at: session.expires_at, token_type: session.token_type },
+    isNewUser,
+  });
+});
+
 /** Always 200 to avoid leaking which accounts exist. Supabase emails the reset link (configure Resend SMTP in Supabase). */
 r.post('/forgot-password', async (req, res) => {
   const { identifier } = z.object({ identifier: z.string().min(3) }).parse(req.body);
