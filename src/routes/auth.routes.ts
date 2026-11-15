@@ -7,6 +7,7 @@ import { passwordSchema, phoneSchema } from '../lib/common';
 import { issueOtp, verifyOtp } from '../lib/otp';
 import { sendSms } from '../lib/sms';
 import { authenticate } from '../middleware/auth';
+import { logger } from '../lib/logger';
 
 const r = Router();
 
@@ -38,27 +39,24 @@ r.post('/register', async (req, res) => {
     );
   }
 
-  // Check whether email or phone is already registered.
-  const { data: taken, error: checkError } = await db
-    .from('profiles')
-    .select('id')
-    .or(`phone.eq.${b.phone},email.eq.${b.email}`)
-    .maybeSingle();
-
+  // Check whether email or phone is already registered. Two separate lookups: a combined OR with
+  // maybeSingle() errors when the email and the phone belong to two different accounts.
+  const email = b.email.trim().toLowerCase();
+  const [byPhone, byEmail] = await Promise.all([
+    db.from('profiles').select('id').eq('phone', b.phone).limit(1),
+    db.from('profiles').select('id').ilike('email', email.replace(/[\\%_]/g, (c) => '\\' + c)).limit(1),
+  ]);
+  const checkError = byPhone.error ?? byEmail.error;
   if (checkError) {
-    throw new HttpError(500, 'Could not verify account details');
+    logger.error({ err: checkError }, 'register: duplicate check failed');
+    throw new HttpError(500, 'Could not verify account details. Please try again.');
   }
-
-  if (taken) {
-    throw conflict(
-      'An account with this email or phone already exists',
-      'ACCOUNT_EXISTS'
-    );
-  }
+  if (byEmail.data?.length) throw conflict('An account with this email already exists. Sign in instead, or use “Forgot password”.', 'ACCOUNT_EXISTS');
+  if (byPhone.data?.length) throw conflict('This phone number is already linked to another account.', 'PHONE_IN_USE');
 
   // Create Supabase Auth user.
   const { data, error } = await db.auth.admin.createUser({
-    email: b.email,
+    email,
     password: b.password,
     email_confirm: true,
     user_metadata: {
@@ -79,7 +77,7 @@ r.post('/register', async (req, res) => {
   // Sign in the newly created user.
   const { data: s, error: se } = await anonClient()
     .auth.signInWithPassword({
-      email: b.email,
+      email,
       password: b.password,
     });
 
