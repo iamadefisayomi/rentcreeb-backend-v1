@@ -114,3 +114,6 @@ tr.click { cursor: pointer; } tr.click:hover td { background: var(--bg); }
   .kv { grid-template-columns: 1fr; }
   .kv dt { margin-top: 6px; }
 }
+
+.brand img { display: block; }
+@media (prefers-color-scheme: dark) { .login-logo { content: url(logo-white.svg); } }

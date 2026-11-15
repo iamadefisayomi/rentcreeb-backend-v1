@@ -93,7 +93,7 @@
       var c = n[2] && counts[n[2]] ? '<span class="badge">' + counts[n[2]] + '</span>' : '';
       return '<a class="nav' + (section === n[0] ? ' on' : '') + '" href="#/' + n[0] + '">' + esc(n[1]) + c + '</a>';
     }).join('');
-    $('#app').innerHTML = '<div class="shell"><aside class="side" id="side"><div class="brand">RentCreeb <span>Admin</span></div>' + nav +
+    $('#app').innerHTML = '<div class="shell"><aside class="side" id="side"><div class="brand"><img src="logo-white.svg" alt="RentCreeb" height="22"> <span>Admin</span></div>' + nav +
       '<div class="side-foot"><div>Signed in as<br><b style="color:#fff">' + name(me) + '</b></div><button id="logout">Sign out</button></div></aside>' +
       '<main class="main"><div class="head"><div><div class="row"><button class="btn sm menu-btn" id="menu">☰ Menu</button><h1>' + esc(title) + '</h1></div>' +
       (sub ? '<p>' + esc(sub) + '</p>' : '') + '</div><div class="row">' + (actions || '') + '</div></div><div id="view"><div class="spinner">Loading…</div></div></main></div>';
@@ -147,7 +147,7 @@
 
   // ───────── login ─────────
   function renderLogin(msg) {
-    $('#app').innerHTML = '<div class="login"><form class="card" id="login"><div><h1>RentCreeb Admin</h1><p class="muted" style="margin:6px 0 0">Sign in with your admin account.</p></div>' +
+    $('#app').innerHTML = '<div class="login"><form class="card" id="login"><div><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo"><h1 style="margin-top:14px">Admin sign-in</h1><p class="muted" style="margin:6px 0 0">Sign in with your admin account.</p></div>' +
       (msg ? '<div class="err">' + esc(msg) + '</div>' : '') +
       '<label>Email<input class="input" name="email" type="email" autocomplete="username" required></label>' +
       '<label>Password<input class="input" name="password" type="password" autocomplete="current-password" required></label>' +
