@@ -58,19 +58,36 @@ r.get('/:id', async (req, res) => {
   res.json({ conversation: conv });
 });
 
+/** The quoted message shown above a reply. */
+const REPLY_EMBED = 'reply_to:messages!messages_reply_to_id_fkey(id, body, attachment_url, sender_id)';
+
 r.get('/:id/messages', async (req, res) => {
   await getConv(req.params.id, req.user.id);
   const { before, limit } = z.object({ before: z.string().optional(), limit: z.coerce.number().max(100).default(40) }).parse(req.query);
-  let q = db.from('messages').select('*').eq('conversation_id', req.params.id).order('created_at', { ascending: false }).limit(limit);
-  if (before) q = q.lt('created_at', before);
-  res.json({ messages: (await q).data });
+  const page = (cols: string) => {
+    let q = db.from('messages').select(cols).eq('conversation_id', req.params.id).order('created_at', { ascending: false }).limit(limit);
+    if (before) q = q.lt('created_at', before);
+    return q;
+  };
+  let r1 = await page(`*, ${REPLY_EMBED}`);
+  // Before migration 010 the reply relation doesn't exist yet: fall back to plain messages instead of an empty chat.
+  if (r1.error) r1 = await page('*');
+  res.json({ messages: r1.data ?? [] });
 });
 
 r.post('/:id/messages', async (req, res) => {
   const c = await getConv(req.params.id, req.user.id);
-  const b = z.object({ body: z.string().max(4000).optional(), attachmentUrl: z.string().url().optional() }).parse(req.body);
+  const b = z.object({ body: z.string().max(4000).optional(), attachmentUrl: z.string().url().optional(), replyToId: z.string().uuid().optional() }).parse(req.body);
   if (!b.body && !b.attachmentUrl) throw badRequest('Empty message');
-  const msg = unwrap(await db.from('messages').insert({ conversation_id: c.id, sender_id: req.user.id, body: b.body, attachment_url: b.attachmentUrl }).select().single());
+  let quoted: { id: string; body: string | null; attachment_url: string | null; sender_id: string } | null = null;
+  if (b.replyToId) {
+    const { data } = await db.from('messages').select('id, body, attachment_url, sender_id, conversation_id').eq('id', b.replyToId).maybeSingle();
+    if (!data || data.conversation_id !== c.id) throw badRequest('You can only reply to a message in this chat', 'BAD_REPLY');
+    quoted = { id: data.id, body: data.body, attachment_url: data.attachment_url, sender_id: data.sender_id };
+  }
+  const row: Record<string, unknown> = { conversation_id: c.id, sender_id: req.user.id, body: b.body, attachment_url: b.attachmentUrl };
+  if (quoted) row.reply_to_id = quoted.id; // only touch the column when replying, so plain messages work before migration 010
+  const msg = { ...unwrap(await db.from('messages').insert(row).select().single()), reply_to: quoted };
   const other = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
   await notify(other, 'message', fullName(req.user) || 'New message', b.body?.slice(0, 100) ?? '📎 Attachment', { conversationId: c.id });
   res.status(201).json({ message: msg });
