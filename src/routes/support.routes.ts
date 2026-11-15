@@ -17,6 +17,8 @@ export const PRIVACY_DEFAULTS = {
   analytics: true,
   personalisation: true,
   marketing: false,
+  /** Show when I'm online, typing or on a call. Turning it off also hides other people's status from me. */
+  activity_status: true,
 } as const;
 export type PrivacyPrefKey = keyof typeof PRIVACY_DEFAULTS;
 const resolvePrivacy = (saved: unknown) => ({ ...PRIVACY_DEFAULTS, ...((saved as object) ?? {}), essential: true });

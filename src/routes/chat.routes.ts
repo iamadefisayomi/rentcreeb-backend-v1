@@ -5,6 +5,8 @@ import { forbidden, notFound, badRequest } from '../lib/errors';
 import { fullName } from '../lib/common';
 import { authenticate } from '../middleware/auth';
 import { notify } from '../services/notify';
+import { isTyping, presenceOf, setTyping } from '../services/presence';
+import { PRIVACY_DEFAULTS } from './support.routes';
 
 const r = Router();
 r.use(authenticate);
@@ -88,9 +90,38 @@ r.post('/:id/messages', async (req, res) => {
   const row: Record<string, unknown> = { conversation_id: c.id, sender_id: req.user.id, body: b.body, attachment_url: b.attachmentUrl };
   if (quoted) row.reply_to_id = quoted.id; // only touch the column when replying, so plain messages work before migration 010
   const msg = { ...unwrap(await db.from('messages').insert(row).select().single()), reply_to: quoted };
+  setTyping(c.id, req.user.id, false);
   const other = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
   await notify(other, 'message', fullName(req.user) || 'New message', b.body?.slice(0, 100) ?? '📎 Attachment', { conversationId: c.id });
   res.status(201).json({ message: msg });
+});
+
+const showsActivity = (prefs: unknown) => ((prefs as Record<string, unknown> | null)?.activity_status ?? PRIVACY_DEFAULTS.activity_status) !== false;
+
+/** "I'm typing" ping (the app sends it at most every few seconds while the composer has text; it expires by itself). */
+r.post('/:id/typing', async (req, res) => {
+  const c = await getConv(req.params.id, req.user.id);
+  const { typing } = z.object({ typing: z.boolean() }).parse(req.body ?? {});
+  setTyping(c.id, req.user.id, typing);
+  res.status(204).end();
+});
+
+/** The other person's live status for the chat header: typing…, on a call, online / last seen. */
+r.get('/:id/activity', async (req, res) => {
+  const c = await getConv(req.params.id, req.user.id);
+  const otherId = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
+  const { data: other } = await db.from('profiles').select('privacy_prefs').eq('id', otherId).maybeSingle();
+  if (!showsActivity(other?.privacy_prefs) || !showsActivity((req.user as any).privacy_prefs)) {
+    return res.json({ visible: false, typing: false, inCall: false, online: false, lastSeenAt: null });
+  }
+  // "On a call": answered, or ringing within the last minute. Missing calls table (before migration 009) just means no.
+  // Answered calls older than 2h are treated as stale (an app that crashed without hanging up).
+  const since = new Date(Date.now() - 60_000).toISOString();
+  const stale = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const calls = await db.from('calls').select('id, status, created_at').or(`caller_id.eq.${otherId},callee_id.eq.${otherId}`)
+    .or(`and(status.eq.accepted,created_at.gte."${stale}"),and(status.eq.ringing,created_at.gte."${since}")`).limit(1);
+  const inCall = !calls.error && (calls.data ?? []).length > 0;
+  res.json({ visible: true, typing: isTyping(c.id, otherId), inCall, ...presenceOf(otherId) });
 });
 
 r.post('/:id/read', async (req, res) => {

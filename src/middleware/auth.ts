@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../lib/supabase';
 import { forbidden, HttpError, unauthorized } from '../lib/errors';
+import { markSeen } from '../services/presence';
 
 type Role = Profile['role'];
 
@@ -14,6 +15,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   if (!profile) throw new HttpError(403, 'Profile not found', 'NO_PROFILE');
   if (profile.is_suspended) throw forbidden('Account suspended', 'SUSPENDED');
   req.user = profile as Profile;
+  markSeen(profile.id);
   next();
 }
 
