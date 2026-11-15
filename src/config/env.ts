@@ -44,6 +44,12 @@ const schema = z.object({
   /** Inbox that receives Contact Support / Report a Bug submissions (optional; tickets are always stored). */
   SUPPORT_EMAIL: z.string().email().optional(),
 
+  /** In-app calls: STUN servers (comma-separated) and an optional TURN relay for callers behind strict NATs. */
+  STUN_URLS: z.string().default('stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302'),
+  TURN_URLS: z.string().optional(),
+  TURN_USERNAME: z.string().optional(),
+  TURN_CREDENTIAL: z.string().optional(),
+
   INSPECTION_FEE_KOBO: z.coerce.number().default(500000),
   INSPECTION_PLATFORM_FEE_PCT: z.coerce.number().default(10),
   JOB_PLATFORM_FEE_PCT: z.coerce.number().default(5),

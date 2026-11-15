@@ -26,9 +26,9 @@ const TYPE_PREF: Record<string, NotificationPrefKey> = {
   rentsave: 'rentsave_deductions',
   payment_released: 'escrow_updates', revision_requested: 'escrow_updates', revision_approved: 'escrow_updates', revision_rejected: 'escrow_updates',
   maintenance_request: 'ticket_status', maintenance_update: 'ticket_status',
-  new_quote: 'artisan_assigned', quote_accepted: 'artisan_assigned', job_started: 'artisan_assigned',
+  new_quote: 'artisan_assigned', quote_accepted: 'artisan_assigned', job_started: 'artisan_assigned', job_alert: 'artisan_assigned',
   job_complete: 'repair_completed',
-  message: 'new_messages',
+  message: 'new_messages', incoming_call: 'new_messages', missed_call: 'new_messages',
   new_review: 'new_review', review_reply: 'new_review',
   verified: 'platform_updates', tenancy_added: 'platform_updates', report_submitted: 'platform_updates',
 };
@@ -39,8 +39,8 @@ export type NotificationCategory = typeof NOTIFICATION_CATEGORIES[number];
 const CATEGORY_TYPES: Record<Exclude<NotificationCategory, 'account'>, string[]> = {
   payments: ['payment_success', 'rent_paid', 'rent_reminder', 'subscription_active', 'subscription_expired', 'rentsave', 'payment_released', 'revision_requested', 'revision_approved', 'revision_rejected'],
   bookings: ['booking_request', 'booking_confirmed', 'booking_cancelled', 'inspection_done'],
-  maintenance: ['maintenance_request', 'maintenance_update', 'maintenance_escalated', 'new_quote', 'quote_accepted', 'job_started', 'job_complete', 'report_submitted', 'report_approved', 'report_rejected', 'report_countered'],
-  messages: ['message'],
+  maintenance: ['maintenance_request', 'maintenance_update', 'maintenance_escalated', 'job_alert', 'new_quote', 'quote_accepted', 'job_started', 'job_complete', 'report_submitted', 'report_approved', 'report_rejected', 'report_countered'],
+  messages: ['message', 'incoming_call', 'missed_call'],
   reviews: ['new_review', 'review_reply'],
 };
 export const categoryOf = (type: string): NotificationCategory =>

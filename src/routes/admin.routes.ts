@@ -28,12 +28,12 @@ r.post('/properties/:id/decision', async (req, res) => {
 
 // Artisan applications
 // artisan_documents links to profiles (not artisan_profiles), so documents are embedded through the profile and
-// lifted back up to keep the response shape { ...artisan, profiles, artisan_documents }.
+// lifted back up to keep the response shape { ...artisan, profiles, artisan_documents, artisan_references }.
 r.get('/artisans/pending', async (_req, res) => {
-  const { data } = await db.from('artisan_profiles').select('*, profiles(first_name, last_name, phone, email, nin_verified, artisan_documents(id, doc_type))').eq('review_status', 'pending').order('submitted_at');
+  const { data } = await db.from('artisan_profiles').select('*, profiles(first_name, last_name, phone, email, nin_verified, artisan_documents(id, doc_type), artisan_references(*))').eq('review_status', 'pending').order('submitted_at');
   res.json({ artisans: (data ?? []).map((a: any) => {
-    const { artisan_documents, ...profile } = a.profiles ?? {};
-    return { ...a, profiles: profile, artisan_documents: artisan_documents ?? [] };
+    const { artisan_documents, artisan_references, ...profile } = a.profiles ?? {};
+    return { ...a, profiles: profile, artisan_documents: artisan_documents ?? [], artisan_references: artisan_references ?? [] };
   }) });
 });
 

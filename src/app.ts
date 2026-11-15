@@ -17,6 +17,7 @@ import bookingsRoutes from './routes/bookings.routes';
 import reviewsRoutes from './routes/reviews.routes';
 import reportsRoutes from './routes/reports.routes';
 import chatRoutes from './routes/chat.routes';
+import callsRoutes from './routes/calls.routes';
 import paymentsRoutes, { webhookRouter } from './routes/payments.routes';
 import subscriptionsRoutes from './routes/subscriptions.routes';
 import walletRoutes from './routes/wallet.routes';
@@ -57,6 +58,7 @@ export function createApp() {
   v1.use('/reviews', reviewsRoutes);
   v1.use('/reports', reportsRoutes);
   v1.use('/conversations', chatRoutes);
+  v1.use('/calls', callsRoutes);
   v1.use('/payments', paymentsRoutes);
   v1.use('/subscriptions', subscriptionsRoutes);
   v1.use('/wallet', walletRoutes);

@@ -41,7 +41,23 @@ r.post('/', requireRole(...LANDLORDS), requireVerified, async (req, res) => {
     urgency: b.urgency, budget_min_kobo: b.budgetMinKobo, budget_max_kobo: b.budgetMaxKobo, access_notes: b.accessNotes }).select().single());
   if (b.mediaUrls.length) await db.from('job_media').insert(b.mediaUrls.map((url) => ({ job_id: job.id, kind: 'issue', url })));
   res.status(201).json({ job });
+  void alertMatchingArtisans(job, req.user.id);
 });
+
+/** Tell approved, available artisans whose skills and service areas match a newly posted job. Best effort, after the response. */
+async function alertMatchingArtisans(job: { id: string; title: string; category: string; property_id: string; urgency?: string }, landlordId: string) {
+  try {
+    const { data: prop } = await db.from('properties').select('area').eq('id', job.property_id).maybeSingle();
+    const { data: pros } = await db.from('artisan_profiles').select('user_id, skill_category, additional_skills, service_areas')
+      .eq('review_status', 'approved').eq('available', true).limit(1000);
+    const matches = (pros ?? []).filter((a: any) => a.user_id !== landlordId
+      && (['other', 'general repair'].includes(norm(a.skill_category)) || skillMatches(job, [a.skill_category, ...(a.additional_skills ?? [])].filter(Boolean)))
+      && (!(a.service_areas ?? []).length || areaMatches(prop?.area, a.service_areas)));
+    const where = prop?.area ? ` in ${prop.area}` : '';
+    await Promise.all(matches.slice(0, 200).map((a: any) =>
+      notify(a.user_id, 'job_alert', job.urgency === 'urgent' ? `Urgent ${job.category} job${where}` : `New ${job.category} job${where}`, job.title, { jobId: job.id })));
+  } catch { /* alerts are best effort; the job is already posted */ }
+}
 
 r.get('/mine', requireRole(...LANDLORDS), async (req, res) => {
   const { data } = await db.from('jobs').select('*, job_quotes(count), properties(title)').eq('landlord_id', req.user.id).order('created_at', { ascending: false });
@@ -174,12 +190,35 @@ r.post('/:id/review', async (req, res) => {
 });
 
 // ───────── Artisan: alerts, detail, quotes, work ─────────
-/** Job alerts: matches the artisan's skill, hides declined/quoted jobs. ?category&sort=newest|closest|budget&lat&lng&urgent */
+// ───────── Job matching (alerts) ─────────
+const norm = (v: unknown) => String(v ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/** Common short forms artisans type for service areas. */
+const AREA_ALIAS: Record<string, string> = { vi: 'victoria island', 'v i': 'victoria island', 'lekki ph 1': 'lekki phase 1', gra: 'gra' };
+const areaKey = (v: unknown) => { const n = norm(v); return AREA_ALIAS[n] ?? n; };
+/** "Lekki" covers "Lekki Phase 1"; "Lekki Phase 1" also matches a job tagged just "Lekki". */
+export function areaMatches(jobArea: unknown, serviceAreas: string[]) {
+  const a = areaKey(jobArea);
+  if (!a) return true; // jobs without an area are never hidden
+  return serviceAreas.some((s) => { const k = areaKey(s); return !!k && (a === k || a.startsWith(k + ' ') || k.startsWith(a + ' ') || a.includes(' ' + k)); });
+}
+/** A job matches when its category is one of the artisan's skills, or its title mentions a custom skill. */
+export function skillMatches(job: { category?: string; title?: string }, skills: string[]) {
+  // Singularise words so "Boreholes" matches "borehole pump".
+  const stem = (v: unknown) => norm(v).replace(/(\w{3,})s\b/g, '$1');
+  const cat = stem(job.category); const title = stem(job.title);
+  return skills.some((s) => { const k = stem(s); return !!k && (cat === k || (k.length > 3 && (cat.includes(k) || title.includes(k)))); });
+}
+
+/**
+ * Job alerts: hides declined/quoted jobs. By default only jobs matching the artisan's skills (primary + additional)
+ * in their service areas; ?anywhere=true drops the area filter, ?category narrows to one category.
+ * ?category&sort=newest|closest|budget&lat&lng&urgent&anywhere
+ */
 r.get('/alerts', requireRole('artisan'), async (req, res) => {
   const ap = await artisanApproved(req.user.id);
   const { from, to } = paginate(req.query);
   const q = z.object({ category: z.string().optional(), sort: z.enum(['newest', 'closest', 'budget']).default('newest'),
-    lat: z.coerce.number().optional(), lng: z.coerce.number().optional(), urgent: boolish.optional() }).parse(req.query);
+    lat: z.coerce.number().optional(), lng: z.coerce.number().optional(), urgent: boolish.optional(), anywhere: boolish.optional() }).parse(req.query);
 
   const [{ data: declined }, { data: quoted }] = await Promise.all([
     db.from('job_declines').select('job_id').eq('artisan_id', req.user.id),
@@ -187,18 +226,26 @@ r.get('/alerts', requireRole('artisan'), async (req, res) => {
   ]);
   const skip = new Set([...(declined ?? []), ...(quoted ?? [])].map((x) => x.job_id));
   let query = db.from('jobs').select('*, properties(area, lat, lng), job_quotes(count)').eq('status', 'open');
-  const cat = q.category ?? ap.skill_category;
-  if (cat) query = query.ilike('category', cat);
+  if (q.category) query = query.ilike('category', q.category);
   if (q.urgent) query = query.eq('urgency', 'urgent');
-  const { data } = await query.order('created_at', { ascending: false }).limit(200);
+  const { data } = await query.order('created_at', { ascending: false }).limit(300);
 
-  let jobs = (data ?? []).filter((j: any) => !skip.has(j.id)).map((j: any) => ({
+  const skills: string[] = [ap.skill_category, ...(ap.additional_skills ?? [])].filter(Boolean);
+  const areas: string[] = (ap.service_areas ?? []).filter(Boolean);
+  // "Other" / "General Repair" artisans see every category; everyone else sees their skills.
+  const broad = !skills.length || ['other', 'general repair'].includes(norm(ap.skill_category));
+  const byArea = !q.anywhere && areas.length > 0;
+  let jobs = (data ?? [])
+    .filter((j: any) => !skip.has(j.id))
+    .filter((j: any) => q.category || broad || skillMatches(j, skills))
+    .filter((j: any) => !byArea || areaMatches(j.properties?.area, areas))
+    .map((j: any) => ({
     ...j, quotesCount: j.job_quotes?.[0]?.count ?? 0,
     distanceKm: q.lat != null && q.lng != null && j.properties?.lat != null ? +haversineKm(q.lat, q.lng, j.properties.lat, j.properties.lng).toFixed(1) : null,
   }));
   if (q.sort === 'closest') jobs.sort((a, b) => (a.distanceKm ?? 1e9) - (b.distanceKm ?? 1e9));
   if (q.sort === 'budget') jobs.sort((a, b) => Number(b.budget_max_kobo) - Number(a.budget_max_kobo));
-  res.json({ jobs: jobs.slice(from, to + 1), total: jobs.length });
+  res.json({ jobs: jobs.slice(from, to + 1), total: jobs.length, filteredByArea: byArea, serviceAreas: areas });
 });
 
 r.get('/quotes/mine', requireRole('artisan'), async (req, res) => {
