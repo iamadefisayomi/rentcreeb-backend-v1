@@ -47,11 +47,17 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
   const record = { user_id: req.user.id, nin_hash: ninHash, nin_last3: nin.slice(-3) };
   try {
     const result = await verifyNinWithSelfie(nin, req.file.buffer.toString('base64'));
+    const meta = { face_match: (result.raw as any)?.face_match?.status, request_id: (result.raw as any)?.request_id };
     if (!result.match || result.confidence < env.BYTID_MIN_CONFIDENCE) {
-      await db.from('verifications').insert({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH' });
+      // Close calls (old NIMC photo, poor light) go to a person instead of locking the user out.
+      if (result.confidence >= env.BYTID_REVIEW_SCORE) {
+        await db.from('verifications').insert({ ...record, status: 'manual_review', confidence: result.confidence, failure_reason: 'FACE_BORDERLINE', metadata: meta });
+        return res.status(202).json({ status: 'in_review', message: 'Your selfie was a close match. Our team will review it and confirm by email, usually within 24 hours.' });
+      }
+      await db.from('verifications').insert({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH', metadata: meta });
       throw new HttpError(422, 'We could not match your selfie to your NIN record', 'FACE_MISMATCH', { attemptsRemaining: Math.max(0, env.NIN_MAX_ATTEMPTS - used - 1) });
     }
-    await db.from('verifications').insert({ ...record, status: 'success', confidence: result.confidence });
+    await db.from('verifications').insert({ ...record, status: 'success', confidence: result.confidence, metadata: meta });
     await db.from('profiles').update({ nin_verified: true, updated_at: new Date().toISOString() }).eq('id', req.user.id);
     await notify(req.user.id, 'verified', 'Identity verified ✅', 'You now have full access to RentCreeb.');
     res.json({ status: 'verified', ninLast3: nin.slice(-3) });

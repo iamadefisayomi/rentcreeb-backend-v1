@@ -23,7 +23,10 @@ const schema = z.object({
   // One URL for sandbox and live: a uvk_test_ key runs in sandbox, a uvk_live_ key runs live.
   BYTID_BASE_URL: z.string().url().default('https://api.bytid.com/v1').transform((u) => u.replace(/\/+$/, '')),
   BYTID_API_KEY: z.string().min(1),
-  BYTID_MIN_CONFIDENCE: z.coerce.number().default(70),
+  // Bytid's own "matched" verdict is trusted by default (0). Raise this only to be stricter than Bytid.
+  BYTID_MIN_CONFIDENCE: z.coerce.number().default(0),
+  // A "not_matched" scoring at least this high goes to manual review instead of failing (and doesn't use an attempt).
+  BYTID_REVIEW_SCORE: z.coerce.number().default(45),
   NIN_MAX_ATTEMPTS: z.coerce.number().default(3),
 
   PAYSTACK_SECRET_KEY: z.string().min(1),

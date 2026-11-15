@@ -82,6 +82,7 @@ export async function verifyNinWithSelfie(nin: string, selfieBase64: string): Pr
   }
 
   const record = data.data ?? {};
+  logger.info({ faceMatch: fm.status, score: fm.score, mode: keyMode(), requestId: json?.request_id }, 'Bytid face match result');
   return {
     match: fm.status === 'matched',
     confidence: Number(fm.score ?? 0),
