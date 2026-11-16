@@ -9,6 +9,8 @@ import { sendEmail } from '../../lib/email';
 import { smsHealth } from '../../lib/sms';
 import { bytidHealth } from '../../lib/bytid';
 import { paystack } from '../../lib/paystack';
+import { aiHealth } from '../../lib/ai';
+import { claudeEnabled, claudeHealth } from '../../lib/claude';
 import { notify } from '../../services/notify';
 import { getSettings, setSetting } from '../../services/settings';
 import { iceServers } from '../calls.routes';
@@ -93,12 +95,13 @@ export function mountPlatform(r: Router) {
   // ───────── System health ─────────
   r.get('/system', async (_req, res) => {
     const probe = async (table: string, col = 'id') => { const { error } = await db.from(table).select(col, { head: true, count: 'exact' }).limit(1); return !error; };
-    const [database, sms, bytid, pay, turn, schema] = await Promise.all([
+    const [database, sms, bytid, pay, turn, ai, schema] = await Promise.all([
       timed(async () => { const t = Date.now(); const { error } = await db.from('profiles').select('id', { head: true, count: 'exact' }).limit(1); return error ? { ok: false, detail: error.message } : { ok: true, latencyMs: Date.now() - t }; }),
       timed(() => smsHealth()),
       timed(() => bytidHealth()),
       timed(async () => { const b = await paystack.balance(); const mode = env.PAYSTACK_SECRET_KEY.startsWith('sk_live_') ? 'live' : env.PAYSTACK_SECRET_KEY.startsWith('sk_test_') ? 'test' : 'unknown'; return { ok: true, mode, balance: b }; }),
       timed(async () => { const list = await iceServers(); const relays = list.flatMap((s) => s.urls).filter((u) => /^turns?:/.test(u)); return { ok: relays.length > 0, relays: relays.length, detail: relays.length ? undefined : 'No TURN relay: calls on mobile data may not connect' }; }),
+      timed(() => (claudeEnabled() ? claudeHealth() : aiHealth())),
       (async () => {
         const checks: [string, Promise<boolean>][] = [
           ['011 admin audit log', probe('admin_actions')],
@@ -107,6 +110,7 @@ export function mountPlatform(r: Router) {
           ['013 admin notes', probe('admin_notes')],
           ['013 runtime settings', probe('app_settings', 'key')],
           ['013 announcements', probe('announcements')],
+          ['014 listing AI review', probe('properties', 'ai_review')],
         ];
         return Promise.all(checks.map(async ([name, p]) => ({ name, applied: await p })));
       })(),
@@ -114,7 +118,7 @@ export function mountPlatform(r: Router) {
     const mem = process.memoryUsage();
     res.json({
       server: { ok: true, env: env.NODE_ENV, node: process.version, uptimeSec: Math.round(process.uptime()), memoryMb: Math.round(mem.rss / 1048576), time: new Date().toISOString() },
-      database, sms, bytid, paystack: pay, turn,
+      database, sms, bytid, paystack: pay, turn, ai,
       email: { ok: !!env.RESEND_API_KEY, detail: env.RESEND_API_KEY ? `Sending as ${env.EMAIL_FROM}` : 'RESEND_API_KEY not set: emails are skipped' },
       storage: { ok: !!(env.BUNNY_STORAGE_ZONE && env.BUNNY_PRIVATE_STORAGE_ZONE && env.BUNNY_PRIVATE_TOKEN_KEY), detail: env.BUNNY_PRIVATE_STORAGE_ZONE ? undefined : 'Private storage zone not configured: ID evidence cannot be stored' },
       migrations: schema,
@@ -128,12 +132,14 @@ export function mountPlatform(r: Router) {
     const b = z.object({
       maintenanceMode: z.boolean().optional(),
       maintenanceMessage: z.string().trim().max(300).optional(),
+      listingAutoApprove: z.boolean().optional(),
       banner: z.object({ message: z.string().trim().min(3).max(200), tone: z.enum(['info', 'warning', 'success']).default('info'), until: z.string().datetime().nullable().optional() }).nullable().optional(),
     }).parse(req.body);
     try {
       if (b.maintenanceMode !== undefined) await setSetting('maintenance_mode', b.maintenanceMode, req.user.id);
       if (b.maintenanceMessage !== undefined) await setSetting('maintenance_message', b.maintenanceMessage, req.user.id);
       if (b.banner !== undefined) await setSetting('banner', b.banner, req.user.id);
+      if (b.listingAutoApprove !== undefined) await setSetting('listing_auto_approve', b.listingAutoApprove, req.user.id);
     } catch (err: any) {
       if (/app_settings|relation|schema cache/i.test(err?.message ?? '')) throw badRequest('Apply migration 013_admin_tools.sql in Supabase to enable runtime settings', 'MIGRATION_REQUIRED');
       throw badRequest(err?.message ?? 'Could not save settings');

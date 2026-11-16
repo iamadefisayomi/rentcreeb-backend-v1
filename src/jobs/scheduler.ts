@@ -3,12 +3,16 @@ import { db } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { notify } from '../services/notify';
 import { deleteFromBunny } from '../lib/bunny';
+import { reviewPendingListings } from '../services/listingReview';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
  * (or move to Supabase pg_cron / a worker) so jobs don't fire twice.
  */
 export function startScheduler() {
+  // Every minute: AI + rule review of listings waiting for approval (auto-approves the ones that fully pass).
+  cron.schedule('* * * * *', () => { void reviewPendingListings(); });
+
   // Every 10 min: expire unpaid bookings (30 min window) and stale OTPs.
   cron.schedule('*/10 * * * *', async () => {
     try {

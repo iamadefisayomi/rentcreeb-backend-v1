@@ -321,7 +321,7 @@
     };
     return table(['When', 'Admin', 'Action', 'Target', 'Details'], rows, function (x) {
       var d = x.details || {}; var det = Object.keys(d).map(function (k) { return esc(k) + ': ' + esc(typeof d[k] === 'object' ? JSON.stringify(d[k]) : d[k]); }).join('<br>');
-      return '<tr><td class="num">' + when(x.created_at) + '</td><td>' + name(x.admin) + '</td><td>' + badge(x.action.replace(/\./g, ' · ')) + '</td><td>' + link(x) + '</td><td class="faint">' + (det || '—') + '</td></tr>';
+      return '<tr><td class="num">' + when(x.created_at) + '</td><td>' + (x.admin ? name(x.admin) : /^property\.auto/.test(x.action) ? badge('RentCreeb AI', 'grey') : '—') + '</td><td>' + badge(x.action.replace(/\./g, ' · ')) + '</td><td>' + link(x) + '</td><td class="faint">' + (det || '—') + '</td></tr>';
     });
   }
 
@@ -421,6 +421,32 @@
     }).catch(fail);
   }
 
+  // ───────── AI listing review ─────────
+  function aiBadge(rv) {
+    if (!rv) return badge('AI check pending', 'grey');
+    if (rv.decision === 'auto_approved') return badge('Approved by AI', 'ok');
+    if (rv.decision === 'error') return badge('AI check failed', 'bad');
+    return badge('AI: needs a look', 'warn');
+  }
+  function aiSummary(rv) {
+    if (!rv) return '';
+    var reasons = (rv.reasons || []).slice(0, 3).map(esc).join(' · ');
+    return '<div class="faint">' + aiBadge(rv) + ' ' + (rv.ai && rv.ai.summary ? esc(rv.ai.summary) + ' ' : '') + (reasons ? '<br>Why not auto-approved: ' + reasons : '') + '</div>';
+  }
+  function aiPanel(rv, p) {
+    var runBtns = '<button class="btn sm" id="ai-run">Run AI check</button>' + (p.status === 'pending' ? '<button class="btn sm primary" id="ai-apply">Run & auto-approve if it passes</button>' : '');
+    if (!rv) return section('AI review', '<div class="faint">Not checked yet. Pending listings are checked automatically within a few minutes of their last change.</div>', '<div class="row">' + runBtns + '</div>');
+    var checks = (rv.checks || []).map(function (c) { return '<div class="row" style="gap:8px"><span class="dot ' + (c.ok ? 'ok' : 'bad') + '"></span><span>' + esc(c.label) + '</span>' + (c.detail ? '<span class="faint">' + esc(c.detail) + '</span>' : '') + '</div>'; }).join('');
+    var ai = rv.ai ? '<div class="stack" style="gap:6px"><div class="row">' + badge('AI verdict: ' + (rv.ai.verdict === 'approve' ? 'looks genuine' : 'needs review'), rv.ai.verdict === 'approve' ? 'ok' : 'warn') + badge(Math.round(rv.ai.confidence * 100) + '% confident', 'grey') + '</div>' +
+      (rv.ai.summary ? '<div class="quote">' + esc(rv.ai.summary) + '</div>' : '') +
+      (rv.ai.issues && rv.ai.issues.length ? '<div><b>Issues</b><ul style="margin:4px 0 0 18px;padding:0">' + rv.ai.issues.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></div>' : '') +
+      (rv.ai.photos && rv.ai.photos.length ? '<div><b>Photos</b>' + rv.ai.photos.map(function (ph) { return '<div class="row" style="gap:8px"><span class="dot ' + (ph.ok ? 'ok' : 'bad') + '"></span><span class="faint">#' + (ph.index + 1) + '</span><span>' + esc(ph.shows) + '</span>' + (ph.note ? '<span class="faint">' + esc(ph.note) + '</span>' : '') + '</div>'; }).join('') + '</div>' : '') + '</div>'
+      : '<div class="faint">No AI result' + (rv.model ? '' : ' (AI is not configured)') + '.</div>';
+    var reasons = (rv.reasons || []).length ? '<div class="alert warn"><b>Not auto-approved because:</b><ul style="margin:4px 0 0 18px;padding:0">' + rv.reasons.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></div>' : '';
+    return section('AI review', '<div class="row">' + aiBadge(rv) + '<span class="faint">checked ' + ago(rv.at) + (rv.model ? ' · ' + esc(rv.model) : '') + (rv.autoApproveOn ? '' : ' · auto-approval off') + '</span></div>' + reasons +
+      '<div class="grid cols-2"><div class="stack" style="gap:6px"><b>Rule checks</b>' + checks + '</div>' + ai + '</div><div class="faint">The AI never rejects on its own: anything it is unsure about waits here for you.</div>', '<div class="row">' + runBtns + '</div>');
+  }
+
   // ═════════ Listings ═════════
   PAGES.listings = function (r) {
     if (r.path[1]) return listingDetail(r.path[1]);
@@ -445,7 +471,7 @@
           '<div class="muted">' + esc([p.address, p.area, p.city].filter(Boolean).join(', ')) + '</div>' +
           '<div class="row"><b class="num">' + naira(p.price_kobo) + '/' + esc(p.price_period || 'year') + '</b><span class="faint">' + label(p.property_type || '') + (p.bedrooms ? ' · ' + p.bedrooms + ' bed' : '') + '</span>' +
           (p.owner ? '<span class="faint">· by ' + userLink(Object.assign({ id: p.owner_id }, p.owner)) + ' (' + label(p.owner.role) + ')' + (p.owner.nin_verified === false ? ' ' + badge('owner not verified', 'warn') : '') + '</span>' : '') + '<span class="faint">· ' + ago(p.created_at) + '</span><span class="faint">· ' + (p.property_media || []).length + ' photos</span></div>' +
-          (p.rejection_reason ? '<div class="faint">Reason: ' + esc(p.rejection_reason) + '</div>' : '') + (p.description ? '<div class="quote">' + esc(String(p.description).slice(0, 500)) + '</div>' : '') +
+          (p.rejection_reason ? '<div class="faint">Reason: ' + esc(p.rejection_reason) + '</div>' : '') + (p.status === 'pending' ? aiSummary(p.ai_review) : '') + (p.description ? '<div class="quote">' + esc(String(p.description).slice(0, 500)) + '</div>' : '') +
           '</div><div class="stack">' + acts + '<a class="btn sm" href="#/listings/' + esc(p.id) + '">Details</a></div></div>';
       }).join('') + '</div>' : '<div class="card empty">Nothing here.</div>') + (tab === 'pending' ? '' : pager(page, j.total, r.raw)));
       var sf = $('#lsearch'); if (sf) sf.onsubmit = function (e) { e.preventDefault(); location.hash = '#/listings' + qs({ tab: tab, q: e.target.q.value.trim(), type: e.target.type.value }); };
@@ -481,6 +507,7 @@
         '<button class="btn" id="p-status">Change status</button><button class="btn" id="p-verify">' + (p.is_verified ? 'Remove verified badge' : 'Give verified badge') + '</button>';
       view('<div class="stack"><div class="card row between"><div class="row">' + statusBadge(p.status) + (p.is_verified ? badge('Verified listing', 'ok') : badge('Not verified', 'grey')) + '<span class="faint">' + j.savedCount + ' saves · created ' + when(p.created_at) + '</span></div><div class="row">' + acts + '</div></div>' +
         (p.rejection_reason ? '<div class="alert warn">Reason given: ' + esc(p.rejection_reason) + '</div>' : '') +
+        aiPanel(p.ai_review, p) +
         section('Photos & videos (' + (p.property_media || []).length + ')', media ? '<div class="gallery">' + media + '</div>' : '<div class="faint">No media</div>') +
         '<div class="grid cols-2">' + section('Details', kv([['Price', '<b>' + naira(p.price_kobo) + '</b> / ' + esc(p.price_period)], ['Type', label(p.property_type)], ['Bedrooms', esc(p.bedrooms)], ['Bathrooms', esc(p.bathrooms)],
           ['Size', p.size_sqm ? esc(p.size_sqm) + ' m²' : ''], ['Inspection fee', p.inspection_fee_kobo != null ? naira(p.inspection_fee_kobo) : ''], ['Caution fee', p.caution_fee_kobo != null ? naira(p.caution_fee_kobo) : ''], ['Agency fee', p.agency_fee_kobo != null ? naira(p.agency_fee_kobo) : ''],
@@ -498,6 +525,15 @@
           { name: 'reason', label: 'Reason (sent to the owner)', type: 'textarea' }, { name: 'notifyOwner', label: 'Notify the owner', type: 'checkbox', value: true }], confirm: 'Save' })
           .then(function (v) { if (v) act(api('/admin/properties/' + p.id, { method: 'PATCH', body: { status: v.status, reason: v.reason, notifyOwner: v.notifyOwner } }), 'Status updated'); });
       });
+      var runAi = function (apply) {
+        toast('Checking the listing… this takes up to a minute');
+        post('/admin/properties/' + p.id + '/ai-review', { apply: apply }).then(function (x) {
+          toast(x.review.decision === 'auto_approved' ? 'Passed: listing approved' : x.review.decision === 'error' ? 'The check failed' : 'Checked: needs a look');
+          route();
+        }).catch(function (e) { toast(e.message, true); });
+      };
+      on('ai-run', function () { runAi(false); });
+      on('ai-apply', function () { runAi(true); });
       on('p-verify', function () { act(api('/admin/properties/' + p.id, { method: 'PATCH', body: { isVerified: !p.is_verified, notifyOwner: false } }), p.is_verified ? 'Badge removed' : 'Listing marked verified'); });
     }).catch(fail);
   }
@@ -1028,6 +1064,9 @@
         section('Maintenance mode', '<p class="muted" style="margin:0">When on, the app shows the message below and blocks everything except sign-in. Admins keep working here.</p>' +
           '<div class="row">' + (st.maintenanceMode ? badge('ON: app is blocked', 'bad') : badge('Off', 'ok')) + '</div>' +
           '<textarea class="input" id="mm-msg" maxlength="300">' + esc(st.maintenanceMessage) + '</textarea><div class="row" style="justify-content:flex-end"><button class="btn" id="mm-save">Save message</button><button class="btn ' + (st.maintenanceMode ? 'ok' : 'danger') + '" id="mm-toggle">' + (st.maintenanceMode ? 'Turn off maintenance' : 'Turn on maintenance') + '</button></div>') +
+        section('Automatic listing approval', '<p class="muted" style="margin:0">New listings are checked by rules and AI within a few minutes. When this is on, listings that pass every check go live without waiting for an admin. Anything doubtful always waits for a person.</p>' +
+          '<div class="row">' + (st.listingAutoApprove ? badge('On', 'ok') : badge('Off: every listing waits for an admin', 'grey')) + (s.ai && s.ai.ok ? '' : badge('AI not available', 'bad')) + '</div>' +
+          '<div class="row" style="justify-content:flex-end"><button class="btn ' + (st.listingAutoApprove ? '' : 'primary') + '" id="aa-toggle">' + (st.listingAutoApprove ? 'Turn off auto-approval' : 'Turn on auto-approval') + '</button></div>') +
         section('App banner', '<p class="muted" style="margin:0">A message shown at the top of the app (returned by /config as <code>banner</code>).</p>' +
           (st.banner ? '<div class="banner-preview alert ' + (tones[st.banner.tone] || 'info') + '">' + esc(st.banner.message) + (st.banner.until ? ' <span class="faint">until ' + when(st.banner.until) + '</span>' : '') + '</div>' : '<div class="faint">No banner showing.</div>') +
           '<div class="row" style="justify-content:flex-end">' + (st.banner ? '<button class="btn ghost-danger" id="bn-clear">Remove banner</button>' : '') + '<button class="btn primary" id="bn-edit">' + (st.banner ? 'Edit banner' : 'Add banner') + '</button></div>') + '</div>' +
@@ -1037,6 +1076,7 @@
         card('SMS (' + esc(s.sms.provider || '') + ')', s.sms, s.sms.balance != null ? kv([['Balance', bal(s.sms.balance)]]) : '') +
         card('NIN checks (Bytid)', s.bytid, kv([['Key mode', esc(s.bytid.mode || '')], ['Balance', s.bytid.balance != null ? esc(s.bytid.balance) + ' ' + esc(s.bytid.currency || '') : '']])) +
         card('Payments (Paystack)', s.paystack, kv([['Key mode', esc(s.paystack.mode || '')], ['Balance', bal(s.paystack.balance)]])) +
+        card('AI (listing review)', s.ai, kv([['Model', esc(s.ai && s.ai.model || '')]])) +
         card('Call relay (TURN)', s.turn, s.turn.relays != null ? '<div class="faint">' + s.turn.relays + ' relay addresses</div>' : '') +
         card('Email (Resend)', s.email) + card('File storage (Bunny)', s.storage) + '</div>' +
         '<h2 class="section-title">Database updates</h2><div class="card">' + table(['Migration', 'Applied'], s.migrations, function (m) { return '<tr><td>' + esc(m.name) + '</td><td>' + (m.applied ? badge('Yes', 'ok') : badge('No', 'bad')) + '</td></tr>'; }) + '</div>' +
@@ -1049,6 +1089,7 @@
         if (st.maintenanceMode) return put({ maintenanceMode: false }, 'Maintenance mode off');
         form({ title: 'Turn on maintenance mode?', body: 'Everyone except admins is blocked from the app until you turn it off.', confirm: 'Turn on', danger: true }).then(function (v) { if (v) put({ maintenanceMode: true, maintenanceMessage: $('#mm-msg') ? $('#mm-msg').value.trim() : undefined }, 'Maintenance mode on'); });
       });
+      on('aa-toggle', function () { put({ listingAutoApprove: !st.listingAutoApprove }, st.listingAutoApprove ? 'Auto-approval off' : 'Auto-approval on'); });
       on('bn-clear', function () { put({ banner: null }, 'Banner removed'); });
       on('bn-edit', function () {
         var b = st.banner || {};

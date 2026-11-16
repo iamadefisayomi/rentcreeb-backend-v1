@@ -388,7 +388,7 @@ r.post('/:id/submit', authenticate, requireRole(...LISTER_ROLES), requireVerifie
   const p = await assertOwner(String(req.params.id), req.user.id);
   if (p.status !== 'unlisted') throw badRequest('Only unlisted properties can be submitted');
   await assertCanList(req.user);
-  await db.from('properties').update({ status: 'pending' }).eq('id', p.id);
+  await db.from('properties').update({ status: 'pending', updated_at: new Date().toISOString() }).eq('id', p.id);
   res.json({ message: 'Submitted for approval' });
 });
 
@@ -403,13 +403,15 @@ r.post('/:id/media', authenticate, requireRole(...LISTER_ROLES), async (req, res
   const { media } = z.object({ media: z.array(mediaItem).min(1).max(30) }).parse(req.body);
   const { count } = await db.from('property_media').select('id', { count: 'exact', head: true }).eq('property_id', p.id);
   const rows = media.map((m, i) => ({ property_id: p.id, url: m.url, media_type: m.type, position: (count ?? 0) + i }));
-  res.status(201).json({ media: unwrap(await db.from('property_media').insert(rows).select()) });
+  const saved = unwrap(await db.from('property_media').insert(rows).select());
+  await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', p.id); // photos changed: re-review if pending
+  res.status(201).json({ media: saved });
 });
 
 r.delete('/:id/media/:mediaId', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   await assertOwner(String(req.params.id), req.user.id);
   const { data } = await db.from('property_media').delete().eq('id', req.params.mediaId).eq('property_id', req.params.id).select().maybeSingle();
-  if (data) await deleteFromBunny(data.url);
+  if (data) { await deleteFromBunny(data.url); await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', req.params.id); }
   res.status(204).end();
 });
 

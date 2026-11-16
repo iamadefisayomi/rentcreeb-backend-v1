@@ -65,6 +65,24 @@ const schema = z.object({
   CF_TURN_KEY_ID: z.string().optional(),
   CF_TURN_API_TOKEN: z.string().optional(),
 
+  // Claude (Anthropic API). When ANTHROPIC_API_KEY is set, the listing review uses Claude; otherwise the provider below.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  CLAUDE_MODEL: z.string().default('claude-opus-5-5'),
+  CLAUDE_EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
+
+  // AI fallback (any OpenAI-compatible chat API; defaults to NVIDIA's free API at build.nvidia.com). Unset key = off.
+  AI_API_KEY: z.string().optional(),
+  NVIDIA_API_KEY: z.string().optional(),
+  AI_BASE_URL: z.string().url().default('https://integrate.api.nvidia.com/v1').transform((u) => u.replace(/\/+$/, '')),
+  /** Must accept images (listing photo checks). */
+  AI_MODEL: z.string().default('nvidia/nemotron-3.5-super-vl-120b-a12b'),
+  /** Requests per minute we allow ourselves. NVIDIA's free tier is ~40 for the whole account: 36 leaves room for retries. */
+  AI_MAX_RPM: z.coerce.number().int().min(1).max(1000).default(36),
+  /** Listing reviews run side by side (each takes 4-10 s), so the per-minute budget is actually used. */
+  AI_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(6),
+  /** Auto-approve listings the AI review fully passes (admins can also switch this off in the dashboard). */
+  LISTING_AUTO_APPROVE: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+
   INSPECTION_FEE_KOBO: z.coerce.number().default(500000),
   INSPECTION_PLATFORM_FEE_PCT: z.coerce.number().default(10),
   JOB_PLATFORM_FEE_PCT: z.coerce.number().default(5),

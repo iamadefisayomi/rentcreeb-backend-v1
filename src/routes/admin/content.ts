@@ -6,6 +6,7 @@ import { signPrivateUrl } from '../../lib/bunny';
 import { paginate, uuid } from '../../lib/common';
 import { notify } from '../../services/notify';
 import { PERSON, audit, count, decision, like, notesFor } from './shared';
+import { reviewListing } from '../../services/listingReview';
 
 const LIVE = ['approved', 'paused', 'unlisted'];
 const PROPERTY_STATUSES = ['unlisted', 'pending', 'approved', 'rejected', 'rented', 'archived'] as const;
@@ -64,6 +65,16 @@ export function mountContent(r: Router) {
     const p = await decideProperty(req, uuid.parse(req.params.id), b.approve, b.reason);
     if (!p) throw notFound('Pending property not found');
     res.json({ property: p });
+  });
+
+  /** Run the automatic review now. `apply` lets it auto-approve a pending listing that fully passes. */
+  r.post('/properties/:id/ai-review', async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const { apply } = z.object({ apply: z.boolean().default(false) }).parse(req.body ?? {});
+    const review = await reviewListing(id, { apply });
+    if (!review) throw notFound('Listing not found');
+    await audit(req, 'property.ai_review', 'property', id, { decision: review.decision, apply });
+    res.json({ review });
   });
 
   /** Approve or reject several pending listings at once. */

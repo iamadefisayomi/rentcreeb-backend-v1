@@ -41,6 +41,17 @@ Anyone without the admin role is refused, both in the page and by the API. You c
 | **Announcements** | Send a notification (and optional email) to everyone or chosen roles / verification states, with a recipient count first; history |
 | **Audit log** | Every admin action, filterable by type or target |
 
+## Automatic listing review (AI)
+
+`src/services/listingReview.ts`, run every minute by the scheduler, up to `AI_MAX_RPM` (36) reviews a minute, `AI_CONCURRENCY` (6) at a time (needs migration `014_listing_ai_review.sql` and `NVIDIA_API_KEY`).
+A listing waiting for approval is checked once it has been unchanged for 2 minutes, and again whenever it changes:
+
+- **Rules:** the owner is verified, active and has no open reports; at least 3 photos, all uploaded in the app (not from other websites) and not used by another listing; no phone numbers, emails or links in the text; a description of at least 60 characters; price within 0.35× to 3× of similar live listings; not a duplicate.
+- **AI** (one request with the text and up to 4 photos): genuine and consistent photos, text matching the type and bedrooms, scam signs, a plausible price.
+- It **auto-approves** only when every rule passes and the AI approves with at least 80% confidence. Otherwise it stays pending with the reasons shown on the listing. It never rejects.
+- Switch auto-approval off in *System & settings*. Run the check by hand from a listing's page. Auto-approvals appear in the audit log as "RentCreeb AI".
+- Use another provider by setting `AI_API_KEY`, `AI_BASE_URL` and `AI_MODEL` (any OpenAI-compatible API whose model accepts images). If NVIDIA is busy or throttles, the listing is retried on the next runs (3 tries per version) before it is left for an admin.
+
 ## How ID evidence is handled
 
 - The selfie is only kept when a person needs to look at it (a close match, a mismatch, or a manual request), in the **private** Bunny zone.
