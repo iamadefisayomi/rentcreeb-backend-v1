@@ -256,6 +256,7 @@
   var PAGES = {};
   function route() {
     $('#modal-root').innerHTML = ''; // never carry a dialog over to another page
+    stopLive();
     if (!session) return renderLogin();
     if (!me) return api('/users/me').then(function (r) {
       var p = r.profile || r.user || r;
@@ -422,19 +423,28 @@
   }
 
   // ───────── AI listing review ─────────
-  function aiBadge(rv) {
+  var STAGE = { rules: 'checking the rules', ai: 'AI is looking at the photos and text', deciding: 'deciding' };
+  function liveBadge(st) {
+    if (!st || st.status === 'done') return '';
+    return st.status === 'running' ? badge('AI checking now: ' + (STAGE[st.stage] || 'working'), 'warn') : badge('AI check queued' + (st.attempts ? ' (retry ' + st.attempts + ')' : ''), 'grey');
+  }
+  function aiBadge(rv, st) {
+    if (st && st.status !== 'done') return liveBadge(st);
     if (!rv) return badge('AI check pending', 'grey');
     if (rv.decision === 'auto_approved') return badge('Approved by AI', 'ok');
     if (rv.decision === 'error') return badge('AI check failed', 'bad');
     return badge('AI: needs a look', 'warn');
   }
-  function aiSummary(rv) {
+  function aiSummary(rv, st) {
+    if (st && st.status !== 'done') return '<div class="faint">' + liveBadge(st) + '</div>';
     if (!rv) return '';
     var reasons = (rv.reasons || []).slice(0, 3).map(esc).join(' · ');
     return '<div class="faint">' + aiBadge(rv) + ' ' + (rv.ai && rv.ai.summary ? esc(rv.ai.summary) + ' ' : '') + (reasons ? '<br>Why not auto-approved: ' + reasons : '') + '</div>';
   }
   function aiPanel(rv, p) {
-    var runBtns = '<button class="btn sm" id="ai-run">Run AI check</button>' + (p.status === 'pending' ? '<button class="btn sm primary" id="ai-apply">Run & auto-approve if it passes</button>' : '');
+    var st = p.ai_status;
+    var runBtns = '<button class="btn sm" id="ai-run">Check now (report only)</button>' + (p.status === 'pending' ? '<button class="btn sm primary" id="ai-apply">Re-run automatic check</button>' : '');
+    if (st && st.status !== 'done') return section('AI review', '<div class="row">' + liveBadge(st) + '<span class="faint">since ' + ago(st.since) + '. This page updates by itself.</span></div>' + (rv ? '<div class="faint">Previous result: ' + aiBadge(rv) + '</div>' : ''));
     if (!rv) return section('AI review', '<div class="faint">Not checked yet. Pending listings are checked automatically within a few minutes of their last change.</div>', '<div class="row">' + runBtns + '</div>');
     var checks = (rv.checks || []).map(function (c) { return '<div class="row" style="gap:8px"><span class="dot ' + (c.ok ? 'ok' : 'bad') + '"></span><span>' + esc(c.label) + '</span>' + (c.detail ? '<span class="faint">' + esc(c.detail) + '</span>' : '') + '</div>'; }).join('');
     var ai = rv.ai ? '<div class="stack" style="gap:6px"><div class="row">' + badge('AI verdict: ' + (rv.ai.verdict === 'approve' ? 'looks genuine' : 'needs review'), rv.ai.verdict === 'approve' ? 'ok' : 'warn') + badge(Math.round(rv.ai.confidence * 100) + '% confident', 'grey') + '</div>' +
@@ -445,6 +455,38 @@
     var reasons = (rv.reasons || []).length ? '<div class="alert warn"><b>Not auto-approved because:</b><ul style="margin:4px 0 0 18px;padding:0">' + rv.reasons.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></div>' : '';
     return section('AI review', '<div class="row">' + aiBadge(rv) + '<span class="faint">checked ' + ago(rv.at) + (rv.model ? ' · ' + esc(rv.model) : '') + (rv.autoApproveOn ? '' : ' · auto-approval off') + '</span></div>' + reasons +
       '<div class="grid cols-2"><div class="stack" style="gap:6px"><b>Rule checks</b>' + checks + '</div>' + ai + '</div><div class="faint">The AI never rejects on its own: anything it is unsure about waits here for you.</div>', '<div class="row">' + runBtns + '</div>');
+  }
+
+  // Live view of the automatic reviewer (polls every 3 s while a listings page is open)
+  var liveTimer = null, liveSeen = null;
+  function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } liveSeen = null; }
+  function startLive(render) {
+    stopLive();
+    var tick = function () {
+      if (document.visibilityState !== 'visible') return;
+      api('/admin/ai-reviews/live').then(function (live) {
+        var ids = live.active.map(function (a) { return a.propertyId; }).join(',');
+        var finished = liveSeen !== null && liveSeen.split(',').some(function (id) { return id && ids.indexOf(id) < 0; });
+        liveSeen = ids;
+        render(live, finished);
+      }).catch(function () {});
+    };
+    tick(); liveTimer = setInterval(tick, 3000);
+  }
+  function renderLivePanel(live, finished) {
+    var el = document.getElementById('ai-live'); if (!el) return;
+    if (finished) { refreshCounts().catch(function () {}); route(); return; } // a check just finished: show the new state
+    var act = live.active.map(function (a) {
+      return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border)"><div class="row"><span class="dot ' + (a.status === 'running' ? 'warn' : '') + '"></span><a href="#/listings/' + esc(a.propertyId) + '">' + esc(a.title || 'Listing') + '</a><span class="faint">' + esc(a.area || '') + '</span></div>' +
+        '<div class="row">' + liveBadge(a) + '<span class="faint">' + ago(a.since) + '</span></div></div>';
+    }).join('');
+    var rec = live.recent.slice(0, 6).map(function (r) {
+      var b = r.decision === 'auto_approved' ? badge('Approved by AI', 'ok') : r.decision === 'error' ? badge('Check failed', 'bad') : badge('Sent to you', 'warn');
+      return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border)"><div class="row"><a href="#/listings/' + esc(r.propertyId) + '">' + esc(r.title || 'Listing') + '</a>' + b + '</div><span class="faint">' + ago(r.at) + '</span></div>';
+    }).join('');
+    el.innerHTML = '<div class="card stack" style="margin-bottom:12px"><div class="row between"><h3>AI reviewer</h3><span class="faint">' +
+      (live.active.length ? live.queue.running + ' checking · ' + Math.max(0, live.active.length - live.queue.running) + ' queued' : 'Idle: new listings are checked within seconds of being submitted') + ' · updates live</span></div>' +
+      (act || '') + (rec ? '<div class="faint" style="margin-top:6px">Latest decisions</div>' + rec : '') + '</div>';
   }
 
   // ═════════ Listings ═════════
@@ -460,7 +502,7 @@
     req.then(function (j) {
       var list = j.properties || [];
       var bulk = tab === 'pending' && list.length ? '<div class="card row between" style="margin-bottom:12px"><label class="check"><input type="checkbox" id="sel-all"><span>Select all</span></label><div class="row"><span class="faint" id="sel-n">0 selected</span><button class="btn ok sm" id="bulk-ok" disabled>Approve selected</button><button class="btn ghost-danger sm" id="bulk-no" disabled>Reject selected</button></div></div>' : '';
-      view(head + (tab === 'pending' ? '' : search) + bulk + (list.length ? '<div class="stack">' + list.map(function (p) {
+      view(head + (tab === 'pending' ? '<div id="ai-live"></div>' : search) + bulk + (list.length ? '<div class="stack">' + list.map(function (p) {
         var img = (p.property_media || []).slice().sort(function (a, b) { return (a.position || 0) - (b.position || 0); })[0];
         var acts = p.status === 'pending' ? '<button class="btn ok sm" data-approve="' + esc(p.id) + '">Approve</button><button class="btn ghost-danger sm" data-reject="' + esc(p.id) + '">Reject</button>'
           : ['approved', 'paused', 'unlisted'].indexOf(p.status) >= 0 ? '<button class="btn ghost-danger sm" data-down="' + esc(p.id) + '">Take down</button>'
@@ -471,10 +513,11 @@
           '<div class="muted">' + esc([p.address, p.area, p.city].filter(Boolean).join(', ')) + '</div>' +
           '<div class="row"><b class="num">' + naira(p.price_kobo) + '/' + esc(p.price_period || 'year') + '</b><span class="faint">' + label(p.property_type || '') + (p.bedrooms ? ' · ' + p.bedrooms + ' bed' : '') + '</span>' +
           (p.owner ? '<span class="faint">· by ' + userLink(Object.assign({ id: p.owner_id }, p.owner)) + ' (' + label(p.owner.role) + ')' + (p.owner.nin_verified === false ? ' ' + badge('owner not verified', 'warn') : '') + '</span>' : '') + '<span class="faint">· ' + ago(p.created_at) + '</span><span class="faint">· ' + (p.property_media || []).length + ' photos</span></div>' +
-          (p.rejection_reason ? '<div class="faint">Reason: ' + esc(p.rejection_reason) + '</div>' : '') + (p.status === 'pending' ? aiSummary(p.ai_review) : '') + (p.description ? '<div class="quote">' + esc(String(p.description).slice(0, 500)) + '</div>' : '') +
+          (p.rejection_reason ? '<div class="faint">Reason: ' + esc(p.rejection_reason) + '</div>' : '') + (p.status === 'pending' ? aiSummary(p.ai_review, p.ai_status) : '') + (p.description ? '<div class="quote">' + esc(String(p.description).slice(0, 500)) + '</div>' : '') +
           '</div><div class="stack">' + acts + '<a class="btn sm" href="#/listings/' + esc(p.id) + '">Details</a></div></div>';
       }).join('') + '</div>' : '<div class="card empty">Nothing here.</div>') + (tab === 'pending' ? '' : pager(page, j.total, r.raw)));
       var sf = $('#lsearch'); if (sf) sf.onsubmit = function (e) { e.preventDefault(); location.hash = '#/listings' + qs({ tab: tab, q: e.target.q.value.trim(), type: e.target.type.value }); };
+      if (tab === 'pending') startLive(renderLivePanel);
       bindListingActions();
       var selected = function () { return $$('.sel:checked').map(function (x) { return x.dataset.id; }); };
       var upd = function () { var n = selected().length; var t = $('#sel-n'); if (t) t.textContent = n + ' selected'; ['bulk-ok', 'bulk-no'].forEach(function (b) { var el = document.getElementById(b); if (el) el.disabled = !n; }); };
@@ -526,14 +569,19 @@
           .then(function (v) { if (v) act(api('/admin/properties/' + p.id, { method: 'PATCH', body: { status: v.status, reason: v.reason, notifyOwner: v.notifyOwner } }), 'Status updated'); });
       });
       var runAi = function (apply) {
+        if (apply) { post('/admin/properties/' + p.id + '/ai-review', { background: true }).then(function () { toast('Queued: watch it run here'); route(); }).catch(function (e) { toast(e.message, true); }); return; }
         toast('Checking the listing… this takes up to a minute');
-        post('/admin/properties/' + p.id + '/ai-review', { apply: apply }).then(function (x) {
-          toast(x.review.decision === 'auto_approved' ? 'Passed: listing approved' : x.review.decision === 'error' ? 'The check failed' : 'Checked: needs a look');
+        post('/admin/properties/' + p.id + '/ai-review', { apply: false }).then(function (x) {
+          toast(x.review.decision === 'error' ? 'The check failed' : 'Checked (nothing changed)');
           route();
         }).catch(function (e) { toast(e.message, true); });
       };
       on('ai-run', function () { runAi(false); });
       on('ai-apply', function () { runAi(true); });
+      if (p.ai_status && p.ai_status.status !== 'done') startLive(function (live) {
+        var mine = live.active.filter(function (a) { return a.propertyId === p.id; })[0];
+        if (!mine) { stopLive(); route(); return; }  // finished: reload to show the result
+      });
       on('p-verify', function () { act(api('/admin/properties/' + p.id, { method: 'PATCH', body: { isVerified: !p.is_verified, notifyOwner: false } }), p.is_verified ? 'Badge removed' : 'Listing marked verified'); });
     }).catch(fail);
   }

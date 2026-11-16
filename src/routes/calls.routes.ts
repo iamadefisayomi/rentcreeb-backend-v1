@@ -181,14 +181,19 @@ r.post('/:id/decline', async (req, res) => {
   res.status(204).end();
 });
 
-/** Either side hangs up. Before an answer: caller = cancelled (or missed on timeout), callee = declined. */
+/**
+ * Either side hangs up. Before an answer: caller = cancelled (or missed on timeout), callee = declined.
+ * A technical failure is always "failed", never "declined": e.g. the callee tapped Accept but their phone couldn't start media.
+ */
 r.post('/:id/end', async (req, res) => {
-  const { reason } = z.object({ reason: z.enum(['hangup', 'no_answer', 'failed', 'busy']).default('hangup') }).parse(req.body ?? {});
+  const { reason, detail } = z.object({ reason: z.enum(['hangup', 'no_answer', 'failed', 'busy']).default('hangup'), detail: z.string().max(60).optional() }).parse(req.body ?? {});
   const c = await load(req.params.id, req.user.id);
-  if (c.status === 'accepted') await finish(c, reason === 'failed' ? 'failed' : 'ended', reason);
+  const why = detail ? `${reason}:${detail.replace(/[^\w:.-]/g, '')}` : reason;
+  if (c.status === 'accepted') await finish(c, reason === 'failed' ? 'failed' : 'ended', why);
   else if (c.status === 'ringing') {
-    if (c.callee_id === req.user.id) await finish(c, 'declined', reason);
-    else await finish(c, reason === 'no_answer' ? 'missed' : reason === 'failed' ? 'failed' : 'cancelled', reason);
+    if (reason === 'failed') await finish(c, 'failed', why);
+    else if (c.callee_id === req.user.id) await finish(c, 'declined', why);
+    else await finish(c, reason === 'no_answer' ? 'missed' : 'cancelled', why);
   }
   res.status(204).end();
 });

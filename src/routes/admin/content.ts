@@ -6,7 +6,20 @@ import { signPrivateUrl } from '../../lib/bunny';
 import { paginate, uuid } from '../../lib/common';
 import { notify } from '../../services/notify';
 import { PERSON, audit, count, decision, like, notesFor } from './shared';
-import { reviewListing } from '../../services/listingReview';
+import { liveListingReviews, queueListingReview, reviewListing } from '../../services/listingReview';
+
+/** Run a query with the private AI review embedded; without it if migration 015 isn't applied yet. */
+async function withAiFallback<T extends { error: any }>(q: (ai: string) => PromiseLike<T>): Promise<T> {
+  const r = await q('listing_ai_reviews(*), ');
+  return r.error && /listing_ai_reviews|relationship/i.test(r.error.message ?? '') ? q('') : r;
+}
+
+/** Flatten the private listing_ai_reviews row onto a listing for the dashboard: ai_review (result) + ai_status (live). */
+function withAi(p: any) {
+  const r = Array.isArray(p?.listing_ai_reviews) ? p.listing_ai_reviews[0] : p?.listing_ai_reviews;
+  const { listing_ai_reviews: _x, ...rest } = p ?? {};
+  return { ...rest, ai_review: r?.review ?? null, ai_status: r ? { status: r.status, stage: r.stage, since: r.started_at ?? r.queued_at, attempts: r.attempts } : null };
+}
 
 const LIVE = ['approved', 'paused', 'unlisted'];
 const PROPERTY_STATUSES = ['unlisted', 'pending', 'approved', 'rejected', 'rented', 'archived'] as const;
@@ -25,7 +38,10 @@ async function decideProperty(req: Request, id: string, approve: boolean, reason
 export function mountContent(r: Router) {
   // ───────── Listings ─────────
   r.get('/properties/pending', async (_req, res) =>
-    res.json({ properties: (await db.from('properties').select('*, property_media(url, position, media_type), owner:profiles!properties_owner_id_fkey(id, first_name, last_name, role, nin_verified)').eq('status', 'pending').order('created_at')).data }));
+    res.json({ properties: ((await withAiFallback((ai) => db.from('properties').select(`*, ${ai}property_media(url, position, media_type), owner:profiles!properties_owner_id_fkey(id, first_name, last_name, role, nin_verified)`).eq('status', 'pending').order('created_at'))).data ?? []).map(withAi) }));
+
+  /** Live view of the automatic reviewer for the dashboard (polled every few seconds while open). */
+  r.get('/ai-reviews/live', async (_req, res) => res.json(await liveListingReviews()));
 
   r.get('/properties', async (req, res) => {
     const { from, to } = paginate(req.query);
@@ -45,8 +61,9 @@ export function mountContent(r: Router) {
 
   r.get('/properties/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    const { data: p } = await db.from('properties').select('*, property_media(id, url, position, media_type), owner:profiles!properties_owner_id_fkey(id, first_name, last_name, email, phone, role, nin_verified, is_suspended)').eq('id', id).maybeSingle();
-    if (!p) throw notFound('Listing not found');
+    const { data: raw } = await withAiFallback((ai) => db.from('properties').select(`*, ${ai}property_media(id, url, position, media_type), owner:profiles!properties_owner_id_fkey(id, first_name, last_name, email, phone, role, nin_verified, is_suspended)`).eq('id', id).maybeSingle());
+    if (!raw) throw notFound('Listing not found');
+    const p = withAi(raw);
     const [units, bookings, reviews, tenancies, saved, nearby, notes] = await Promise.all([
       db.from('units').select('*').eq('property_id', id).order('created_at'),
       db.from('bookings').select(`id, status, scheduled_at, amount_kobo, created_at, tenant:profiles!bookings_tenant_id_fkey(id, first_name, last_name)`).eq('property_id', id).order('created_at', { ascending: false }).limit(30),
@@ -70,7 +87,8 @@ export function mountContent(r: Router) {
   /** Run the automatic review now. `apply` lets it auto-approve a pending listing that fully passes. */
   r.post('/properties/:id/ai-review', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    const { apply } = z.object({ apply: z.boolean().default(false) }).parse(req.body ?? {});
+    const { apply, background } = z.object({ apply: z.boolean().default(false), background: z.boolean().default(false) }).parse(req.body ?? {});
+    if (background) { queueListingReview(id, 0); await audit(req, 'property.ai_review', 'property', id, { queued: true }); return res.status(202).json({ queued: true }); }
     const review = await reviewListing(id, { apply });
     if (!review) throw notFound('Listing not found');
     await audit(req, 'property.ai_review', 'property', id, { decision: review.decision, apply });

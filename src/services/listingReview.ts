@@ -136,20 +136,32 @@ Use "approve" only if everything looks genuine and consistent. When unsure, use 
   };
 }
 
-/** Review one listing. `apply` = auto-approve if it passes (the background job); false = just report (admin "Run check"). */
+/** Review rows live in listing_ai_reviews (migration 015): only the API can read them, never the app. */
+type Stage = 'rules' | 'ai' | 'deciding';
+async function mark(propertyId: string, patch: Record<string, unknown>) {
+  const { error } = await db.from('listing_ai_reviews').upsert({ property_id: propertyId, ...patch, updated_at: new Date().toISOString() });
+  if (error) logger.warn({ err: error.message }, 'listing review: could not save progress (apply migration 015)');
+}
+
+/** Review one listing. `apply` = auto-approve if it passes (automatic runs); false = just report (admin "Run check"). */
 export async function reviewListing(propertyId: string, opts: { apply: boolean } = { apply: true }): Promise<ListingReview | null> {
   const { data: p } = await db.from('properties').select('*').eq('id', propertyId).maybeSingle();
   if (!p) return null;
+  const { data: prevRow } = await db.from('listing_ai_reviews').select('attempts, listing_updated_at, review').eq('property_id', p.id).maybeSingle();
+  const stage = (s: Stage) => mark(p.id, { status: 'running', stage: s });
+  await mark(p.id, { status: 'running', stage: 'rules', started_at: new Date().toISOString() });
+
   const { data: media } = await db.from('property_media').select('url, media_type, position').eq('property_id', p.id).order('position');
   const settings = await getSettings();
   const review: ListingReview = { version: 1, at: new Date().toISOString(), model: aiEnabled() ? aiModel() : null, decision: 'needs_admin', autoApproveOn: settings.listingAutoApprove, checks: [], ai: null, reasons: [] };
   try {
     review.checks = await ruleChecks(p, media ?? []);
-    review.ai = aiEnabled() ? await aiCheck(p, media ?? []) : null;
+    if (aiEnabled()) { await stage('ai'); review.ai = await aiCheck(p, media ?? []); }
   } catch (err) {
     logger.error({ err, propertyId }, 'listing review failed');
     review.decision = 'error'; review.reasons.push('The automatic check failed; review by hand');
   }
+  await stage('deciding');
 
   for (const c of review.checks) if (!c.ok) review.reasons.push(c.label + (c.detail ? ` (${c.detail})` : ''));
   if (!aiEnabled()) review.reasons.push('AI is not configured');
@@ -162,49 +174,108 @@ export async function reviewListing(propertyId: string, opts: { apply: boolean }
   if (!settings.listingAutoApprove) review.reasons.push('Auto-approval is switched off');
 
   let approved = false;
-  if (opts.apply && review.decision !== 'error' && review.reasons.length === 0) {
+  if (opts.apply && p.status === 'pending' && review.decision !== 'error' && review.reasons.length === 0) {
     // Guard on status and on updated_at, so a listing edited during the review is not approved on stale data.
     const { data: done } = await db.from('properties').update({ status: 'approved', is_verified: true, rejection_reason: null })
       .eq('id', p.id).eq('status', 'pending').eq('updated_at', p.updated_at).select('id, owner_id, title').maybeSingle();
     if (done) {
       approved = true; review.decision = 'auto_approved';
+      // The owner gets the same "approved" message as a manual approval: nothing about AI.
       await notify(done.owner_id, 'listing_approved', 'Listing approved ✅', done.title, { propertyId: done.id });
       await db.from('admin_actions').insert({ admin_id: null, action: 'property.auto_approve', target_type: 'property', target_id: p.id,
         details: { title: p.title, model: review.model, confidence: review.ai?.confidence } }).then(({ error }) => { if (error) logger.warn({ err: error }, 'auto-approve audit failed'); });
     } else review.reasons.push('Listing changed during the check: will be checked again');
   }
-  // No AI answer (provider busy / throttled): leave it "due" so the next run tries again, up to MAX_AI_ATTEMPTS per version.
+
+  // No AI answer (provider busy / throttled): queue it again, up to MAX_AI_ATTEMPTS per version of the listing.
   review.listingUpdatedAt = p.updated_at;
-  const prev = p.ai_review as ListingReview | null;
-  review.attempts = !review.ai && aiEnabled() ? (prev && !prev.ai && prev.listingUpdatedAt === p.updated_at ? (prev.attempts ?? 1) + 1 : 1) : 0;
-  const retryLater = !approved && !review.ai && aiEnabled() && review.decision !== 'error' && review.attempts < MAX_AI_ATTEMPTS;
+  const sameVersion = prevRow?.listing_updated_at && Date.parse(prevRow.listing_updated_at) === Date.parse(p.updated_at);
+  review.attempts = !review.ai && aiEnabled() ? (sameVersion && !(prevRow?.review as any)?.ai ? (prevRow?.attempts ?? 0) + 1 : 1) : 0;
+  const retryLater = !approved && !review.ai && aiEnabled() && review.decision !== 'error' && (review.attempts ?? 0) < MAX_AI_ATTEMPTS;
   if (retryLater) review.reasons.push(`Will try the AI check again (attempt ${review.attempts} of ${MAX_AI_ATTEMPTS})`);
-  const { error } = await db.from('properties').update({ ai_review: review, ai_reviewed_at: retryLater ? null : review.at }).eq('id', p.id);
-  if (error) logger.warn({ err: error }, 'could not store listing review (apply migration 014)');
+  await mark(p.id, {
+    status: retryLater ? 'queued' : 'done', stage: null, finished_at: new Date().toISOString(), queued_at: retryLater ? new Date().toISOString() : null,
+    listing_updated_at: p.updated_at, decision: review.decision, attempts: review.attempts, review,
+  });
   logger.info({ propertyId: p.id, decision: review.decision, reasons: review.reasons.length, confidence: review.ai?.confidence }, 'listing reviewed');
   return review;
 }
 
-let running = false;
+// ───────── Automatic runs ─────────
+// A small in-process queue: listings are checked a few seconds after they are submitted or change (debounced, so a
+// burst of photo uploads leads to one check), AI_CONCURRENCY at a time. The rate limiter in lib/ai spaces the requests.
+const timers = new Map<string, ReturnType<typeof setTimeout>>();
+const waiting: string[] = [];
+const inFlight = new Set<string>();
+let active = 0;
+
+function pump() {
+  while (active < env.AI_CONCURRENCY && waiting.length) {
+    const id = waiting.shift()!;
+    if (inFlight.has(id)) continue;
+    inFlight.add(id); active++;
+    reviewListing(id, { apply: true })
+      .catch((err) => logger.error({ err, id }, 'listing review failed'))
+      .finally(() => { inFlight.delete(id); active--; pump(); });
+  }
+}
+
+/** Queue a pending listing for review `delayMs` from now (restarts the wait if it changes again). Never throws. */
+export function queueListingReview(propertyId: string, delayMs = 8_000) {
+  const t = timers.get(propertyId);
+  if (t) clearTimeout(t);
+  void mark(propertyId, { status: 'queued', stage: null, queued_at: new Date().toISOString() });
+  timers.set(propertyId, setTimeout(() => {
+    timers.delete(propertyId);
+    if (!waiting.includes(propertyId) && !inFlight.has(propertyId)) waiting.push(propertyId);
+    pump();
+  }, delayMs));
+}
+
+/** Call after a listing changes: queues it if it is waiting for approval. */
+export async function queueIfPending(propertyId: string) {
+  try {
+    const { data } = await db.from('properties').select('status').eq('id', propertyId).maybeSingle();
+    if (data?.status === 'pending') queueListingReview(propertyId);
+  } catch (err) { logger.warn({ err, propertyId }, 'could not queue listing review'); }
+}
+
 let warned = false;
 /**
- * Background job (every minute): review pending listings that haven't been checked since they last changed.
- * Takes up to one minute of the AI budget per run and works through it AI_CONCURRENCY at a time; the rate limiter in
- * lib/ai spaces the actual requests, so the provider's per-minute limit is used fully but never exceeded.
+ * Safety net (every minute): anything pending that the queue missed, e.g. listings submitted before a server restart,
+ * edited since their last check, left queued for a retry, or stuck "running" after a crash.
  */
 export async function reviewPendingListings(limit = env.AI_MAX_RPM) {
-  if (running) return;
-  running = true;
   try {
-    const settled = new Date(Date.now() - 2 * 60_000).toISOString(); // give the app time to finish uploading photos
-    const { data, error } = await db.from('properties').select('id, updated_at, ai_reviewed_at').eq('status', 'pending').lt('updated_at', settled)
-      .order('updated_at', { ascending: true }).limit(500);
-    if (error) { if (!warned) { warned = true; logger.warn({ err: error }, 'listing review job: apply migration 014'); } return; }
-    const due = (data ?? []).filter((x: any) => !x.ai_reviewed_at || Date.parse(x.ai_reviewed_at) < Date.parse(x.updated_at)).slice(0, limit);
-    let next = 0;
-    const worker = async () => { while (next < due.length) { const x = due[next++]; await reviewListing(x.id, { apply: true }); } };
-    await Promise.all(Array.from({ length: Math.min(env.AI_CONCURRENCY, due.length) }, worker));
-    if (due.length) logger.info({ reviewed: due.length, waiting: Math.max(0, (data ?? []).length - due.length) }, 'listing review run');
+    const settled = new Date(Date.now() - 30_000).toISOString();
+    const { data, error } = await db.from('properties').select('id, updated_at, listing_ai_reviews(status, listing_updated_at, updated_at)')
+      .eq('status', 'pending').lt('updated_at', settled).order('updated_at', { ascending: true }).limit(500);
+    if (error) { if (!warned) { warned = true; logger.warn({ err: error.message }, 'listing review job: apply migration 015'); } return; }
+    const stale = Date.now() - 5 * 60_000;
+    const due = (data ?? []).filter((x: any) => {
+      if (timers.has(x.id) || inFlight.has(x.id) || waiting.includes(x.id)) return false;
+      const r = Array.isArray(x.listing_ai_reviews) ? x.listing_ai_reviews[0] : x.listing_ai_reviews;
+      if (!r) return true;
+      if (r.status === 'queued') return true;
+      if (r.status === 'running') return Date.parse(r.updated_at) < stale;
+      return !r.listing_updated_at || Date.parse(r.listing_updated_at) < Date.parse(x.updated_at);
+    }).slice(0, limit);
+    for (const x of due) waiting.push(x.id);
+    pump();
+    if (due.length) logger.info({ queued: due.length }, 'listing review safety net');
   } catch (err) { logger.error({ err }, 'listing review job failed'); }
-  finally { running = false; }
+}
+
+/** For the admin dashboard: what the reviewer is doing right now, and its latest decisions. */
+export async function liveListingReviews() {
+  const [{ data: now }, { data: recent }] = await Promise.all([
+    db.from('listing_ai_reviews').select('property_id, status, stage, queued_at, started_at, attempts, updated_at, properties(title, area)').in('status', ['queued', 'running']).order('updated_at', { ascending: false }).limit(50),
+    db.from('listing_ai_reviews').select('property_id, decision, finished_at, review, properties(title, area, status)').eq('status', 'done').order('finished_at', { ascending: false }).limit(15),
+  ]);
+  return {
+    active: (now ?? []).map((r: any) => ({ propertyId: r.property_id, title: r.properties?.title, area: r.properties?.area, status: r.status, stage: r.stage, since: r.started_at ?? r.queued_at, attempts: r.attempts })),
+    recent: (recent ?? []).map((r: any) => ({ propertyId: r.property_id, title: r.properties?.title, area: r.properties?.area, listingStatus: r.properties?.status, decision: r.decision, at: r.finished_at,
+      summary: r.review?.ai?.summary ?? null, reasons: (r.review?.reasons ?? []).slice(0, 3) })),
+    queue: { waiting: waiting.length, running: active, maxConcurrent: env.AI_CONCURRENCY },
+  };
 }

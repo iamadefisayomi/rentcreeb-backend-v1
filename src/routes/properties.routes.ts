@@ -8,6 +8,8 @@ import { deleteFromBunny, signPrivateUrl } from '../lib/bunny';
 import { env } from '../config/env';
 import { responseTime } from '../services/responseTime';
 
+import { queueIfPending, queueListingReview } from '../services/listingReview';
+
 const r = Router();
 const LISTER_ROLES = ['agent', 'landlord', 'estate_manager'] as const;
 // '*' so new listing columns (land / commercial, migration 012) appear without breaking search before the migration runs.
@@ -257,6 +259,7 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
     rentKobo: b.pricePeriod === 'year' ? Math.round(b.priceKobo / 12) : b.priceKobo, sizeSqm: b.sizeSqm ?? null, bathrooms: Math.max(1, b.bathrooms),
   }];
   const created = unwrap(await db.from('units').insert(units.map((u) => ({ ...unitRow(u), property_id: p.id }))).select());
+  if (p.status === 'pending') queueListingReview(p.id); // checked on the server in the background; the lister never sees it
   res.status(201).json({ property: p, units: created, message: b.publish ? 'Submitted for approval' : 'Property saved' });
 });
 
@@ -381,7 +384,9 @@ r.patch('/:id', authenticate, requireRole(...LISTER_ROLES), async (req, res) => 
   const patch: Record<string, unknown> = Object.fromEntries(Object.entries(row(b as any)).filter(([, v]) => v !== undefined));
   patch.updated_at = new Date().toISOString();
   if (existing.status === 'rejected') { patch.status = 'pending'; patch.rejection_reason = null; } // edit & resubmit
-  res.json({ property: unwrap(await db.from('properties').update(patch).eq('id', existing.id).select().single()) });
+  const saved = unwrap(await db.from('properties').update(patch).eq('id', existing.id).select().single());
+  if (saved.status === 'pending') queueListingReview(saved.id);
+  res.json({ property: saved });
 });
 
 r.post('/:id/submit', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (req, res) => {
@@ -389,6 +394,7 @@ r.post('/:id/submit', authenticate, requireRole(...LISTER_ROLES), requireVerifie
   if (p.status !== 'unlisted') throw badRequest('Only unlisted properties can be submitted');
   await assertCanList(req.user);
   await db.from('properties').update({ status: 'pending', updated_at: new Date().toISOString() }).eq('id', p.id);
+  queueListingReview(p.id);
   res.json({ message: 'Submitted for approval' });
 });
 
@@ -405,13 +411,14 @@ r.post('/:id/media', authenticate, requireRole(...LISTER_ROLES), async (req, res
   const rows = media.map((m, i) => ({ property_id: p.id, url: m.url, media_type: m.type, position: (count ?? 0) + i }));
   const saved = unwrap(await db.from('property_media').insert(rows).select());
   await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', p.id); // photos changed: re-review if pending
+  void queueIfPending(p.id);
   res.status(201).json({ media: saved });
 });
 
 r.delete('/:id/media/:mediaId', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   await assertOwner(String(req.params.id), req.user.id);
   const { data } = await db.from('property_media').delete().eq('id', req.params.mediaId).eq('property_id', req.params.id).select().maybeSingle();
-  if (data) { await deleteFromBunny(data.url); await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', req.params.id); }
+  if (data) { await deleteFromBunny(data.url); await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', req.params.id); void queueIfPending(String(req.params.id)); }
   res.status(204).end();
 });
 
