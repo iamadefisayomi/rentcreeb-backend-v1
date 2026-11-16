@@ -16,6 +16,16 @@ const keyMode = () => (env.BYTID_API_KEY.startsWith('uvk_live_') ? 'live' : env.
 const providerDown = () =>
   new HttpError(503, 'Identity verification is temporarily unavailable. You can request a manual review instead.', 'VERIFICATION_PROVIDER_ERROR');
 
+/** For the admin System page: key mode and wallet balance (free endpoint). */
+export async function bytidHealth(): Promise<{ ok: boolean; mode: string; balance?: unknown; currency?: string; detail?: string }> {
+  try {
+    const res = await fetch(`${env.BYTID_BASE_URL}/balance`, { headers: authHeaders(), signal: AbortSignal.timeout(15_000) });
+    const json: any = await res.json().catch(() => ({}));
+    if (res.ok) return { ok: true, mode: keyMode(), balance: json?.data?.balance, currency: json?.data?.currency };
+    return { ok: false, mode: keyMode(), detail: `Rejected (${res.status}${json?.error?.code ? ' ' + json.error.code : ''})` };
+  } catch (err) { return { ok: false, mode: keyMode(), detail: String((err as Error)?.message ?? err) }; }
+}
+
 /** Startup self-check against Bytid's free balance endpoint, so bad keys show in the logs immediately — not on a user's first attempt. */
 export async function checkBytidCredentials() {
   try {

@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { db } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { notify } from '../services/notify';
+import { deleteFromBunny } from '../lib/bunny';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
@@ -48,5 +49,17 @@ export function startScheduler() {
         if (t.tenant_id) await notify(t.tenant_id, 'tenancy_update', 'Your lease has ended', 'Your notice period finished today.', { tenancyId: t.id });
       }
     } catch (err) { logger.error({ err }, 'cron: lease terminations failed'); }
+
+    // ID evidence (selfies, ID photos) kept for admin review is deleted 30 days after the check, unless it is still being reviewed.
+    try {
+      const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+      const { data: old, error } = await db.from('verifications').select('id, selfie_path, document_path').neq('status', 'manual_review').lt('created_at', cutoff)
+        .or('selfie_path.not.is.null,document_path.not.is.null').limit(500);
+      if (!error) for (const v of old ?? []) {
+        if (v.selfie_path) await deleteFromBunny(v.selfie_path, true);
+        if (v.document_path) await deleteFromBunny(v.document_path, true);
+        await db.from('verifications').update({ selfie_path: null, document_path: null }).eq('id', v.id);
+      }
+    } catch (err) { logger.error({ err }, 'cron: verification evidence purge failed'); }
   });
 }

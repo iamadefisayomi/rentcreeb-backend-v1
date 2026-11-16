@@ -88,21 +88,31 @@ export function smsConfigSummary() {
   };
 }
 
-/** Startup self-check (free): shows a wrong key, a blocked server or low credit in the logs right away. */
-export async function checkSmsCredentials() {
-  if (!smartReady()) return;
+export type SmsHealth = { ok: boolean; state: 'ok' | 'blocked' | 'auth_failure' | 'unreachable' | 'not_configured'; provider: string; balance?: unknown; detail?: string };
+
+/** Free check against SmartSMS's balance endpoint: wrong key, blocked server (bot check) or credit. */
+export async function smsHealth(): Promise<SmsHealth> {
+  if (!smartReady()) return at ? { ok: true, state: 'ok', provider: 'africastalking', detail: 'Africa’s Talking configured (not checked)' } : { ok: false, state: 'not_configured', provider: 'none' };
   try {
     const res = await fetch(`${SMARTSMS}/balance/${encodeURIComponent(env.SMARTSMS_USERNAME!)}/${encodeURIComponent(env.SMARTSMS_API_KEY!)}`,
       { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
     const text = await res.text();
-    if (/sgcaptcha|Robot Challenge/i.test(text) || res.status === 202) {
-      logger.error({ status: res.status }, 'SmartSMS bot check blocked this server: ask SmartSMS support to allowlist API calls');
-      return;
-    }
+    if (/sgcaptcha|Robot Challenge/i.test(text) || res.status === 202)
+      return { ok: false, state: 'blocked', provider: 'smartsms', detail: 'SmartSMS’s bot check is blocking this server. Ask SmartSMS support to allowlist API calls from it.' };
     let body: any = text.trim();
     try { body = JSON.parse(text); } catch { /* plain-text balance */ }
     const status = body?.response?.status ?? (typeof body === 'string' && /AUTH_FAILURE/.test(body) ? 'AUTH_FAILURE' : undefined);
-    if (status === 'AUTH_FAILURE') logger.error('SmartSMS username/API key REJECTED: SMS will not send until they are fixed');
-    else logger.info({ balance: body?.response?.balance ?? body?.balance ?? body, sender: env.SMARTSMS_SENDER_ID }, 'SmartSMS credentials OK');
-  } catch (err) { logger.warn({ err }, 'SmartSMS credential check could not reach SmartSMS'); }
+    if (status === 'AUTH_FAILURE') return { ok: false, state: 'auth_failure', provider: 'smartsms', detail: 'Username or API key rejected' };
+    return { ok: true, state: 'ok', provider: 'smartsms', balance: body?.response?.balance ?? body?.balance ?? body };
+  } catch (err) { return { ok: false, state: 'unreachable', provider: 'smartsms', detail: String((err as Error)?.message ?? err) }; }
+}
+
+/** Startup self-check (free): shows a wrong key, a blocked server or low credit in the logs right away. */
+export async function checkSmsCredentials() {
+  if (!smartReady()) return;
+  const h = await smsHealth();
+  if (h.state === 'blocked') logger.error('SmartSMS bot check blocked this server: ask SmartSMS support to allowlist API calls');
+  else if (h.state === 'auth_failure') logger.error('SmartSMS username/API key REJECTED: SMS will not send until they are fixed');
+  else if (h.state === 'unreachable') logger.warn({ detail: h.detail }, 'SmartSMS credential check could not reach SmartSMS');
+  else logger.info({ balance: h.balance, sender: env.SMARTSMS_SENDER_ID }, 'SmartSMS credentials OK');
 }

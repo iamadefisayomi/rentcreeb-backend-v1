@@ -25,6 +25,7 @@ import walletRoutes from './routes/wallet.routes';
 import tenanciesRoutes from './routes/tenancies.routes';
 import rentsaveRoutes from './routes/rentsave.routes';
 import maintenanceRoutes from './routes/maintenance.routes';
+import { getSettings } from './services/settings';
 import jobsRoutes from './routes/jobs.routes';
 import artisanRoutes from './routes/artisan.routes';
 import dashboardRoutes from './routes/dashboard.routes';
@@ -67,9 +68,10 @@ export function createApp() {
    * Public client config. The Supabase URL + anon key are public by design (Row Level Security protects data);
    * the app uses them for Realtime with the user's own access token.
    */
-  v1.get('/config', (_req, res) => {
-    res.set('Cache-Control', 'public, max-age=300');
-    res.json({ realtime: { url: env.SUPABASE_URL, anonKey: env.SUPABASE_ANON_KEY }, vatPct: env.VAT_PCT });
+  v1.get('/config', async (_req, res) => {
+    const s = await getSettings();
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ realtime: { url: env.SUPABASE_URL, anonKey: env.SUPABASE_ANON_KEY }, vatPct: env.VAT_PCT, banner: s.banner, maintenance: s.maintenanceMode });
   });
   v1.use('/auth', strict, authRoutes);
   v1.use('/users', usersRoutes);
@@ -94,9 +96,14 @@ export function createApp() {
   v1.use('/support', supportRoutes);
   v1.use('/documents', documentsRoutes);
   v1.use('/admin', adminRoutes);
-  app.use('/api/v1', (_req, res, next) => (env.MAINTENANCE_MODE
-    ? res.status(503).json({ error: { code: 'MAINTENANCE', message: 'RentCreeb is under maintenance. Please try again shortly.' } })
-    : next()), v1);
+  // Maintenance mode (env MAINTENANCE_MODE or the admin dashboard switch). Admins can still sign in and work.
+  const MAINTENANCE_OPEN = /^\/(admin|auth\/(login|refresh|logout)|users\/me$|config$)/;
+  app.use('/api/v1', async (req, res, next) => {
+    if (MAINTENANCE_OPEN.test(req.path)) return next();
+    const s = await getSettings().catch(() => null);
+    if (!s?.maintenanceMode) return next();
+    res.status(503).json({ error: { code: 'MAINTENANCE', message: s.maintenanceMessage } });
+  }, v1);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

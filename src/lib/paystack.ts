@@ -26,6 +26,7 @@ export const paystack = {
     ps<{ status: string; amount: number; reference: string; channel: string }>(`/transaction/verify/${encodeURIComponent(reference)}`),
   refund: (reference: string, amountKobo: number) =>
     ps('/refund', { method: 'POST', body: { transaction: reference, amount: amountKobo } }),
+  balance: () => ps<{ currency: string; balance: number }[]>('/balance'),
   listBanks: () => ps<{ name: string; code: string }[]>('/bank?country=nigeria&perPage=100'),
   resolveAccount: (accountNumber: string, bankCode: string) =>
     ps<{ account_name: string }>(`/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`),
