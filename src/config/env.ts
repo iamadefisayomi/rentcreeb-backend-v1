@@ -15,6 +15,8 @@ const schema = z.object({
   PASSWORD_RESET_REDIRECT_URL: z.string().min(1),
 
   OTP_PEPPER: z.string().min(16),
+  // Optional secret for GET /api/v1/cron/keep-alive (send as Authorization: Bearer <token>).
+  CRON_JOB_TOKEN: z.string().optional(),
 
   // SMS via SmartSMS Nigeria's JSON API (smartsms.ng). Username = your login email; API key from the dashboard.
   SMARTSMS_USERNAME: z.string().optional(),

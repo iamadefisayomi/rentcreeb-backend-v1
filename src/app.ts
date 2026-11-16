@@ -31,13 +31,14 @@ import dashboardRoutes from './routes/dashboard.routes';
 import adminRoutes from './routes/admin.routes';
 import supportRoutes from './routes/support.routes';
 import documentsRoutes from './routes/documents.routes';
+import keepAliveRoutes from './routes/keep-alive.routes';
 
 export function createApp() {
   const app = express();
   app.set('trust proxy', 1);
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGINS === '*' ? true : env.CORS_ORIGINS.split(',') }));
-  app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' } }));
+  app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/health' || !!req.url?.startsWith('/api/v1/cron/keep-alive') } }));
   // Keep the raw body: Paystack webhook signatures are computed over it.
   app.use(express.json({ limit: '1mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
@@ -57,6 +58,8 @@ export function createApp() {
   const strict = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
 
   app.use('/webhooks', webhookRouter);
+  // Before the rate limiter, so a scheduler's pings never get throttled.
+  app.use('/api/v1/cron', keepAliveRoutes);
   app.use(general);
 
   const v1 = express.Router();

@@ -15,6 +15,7 @@ const at = !smartReady() && env.AT_API_KEY ? AfricasTalking({ apiKey: env.AT_API
 /** SmartSMS wants full international format without "+": 2348012345678. */
 export function toIntl(phone: string) {
   const d = phone.replace(/\D/g, '');
+  if (/^2340\d{10}$/.test(d)) return '234' + d.slice(4); // "+234 0803…" typed with the trunk 0
   if (d.startsWith('234')) return d;
   if (d.startsWith('0') && d.length === 11) return '234' + d.slice(1);
   if (d.length === 10) return '234' + d;
@@ -33,7 +34,9 @@ async function readJson(res: Response) {
   }
 }
 
-async function sendViaSmartSms(to: string, message: string) {
+export type SmsResult = { ok: boolean; provider: 'smartsms' | 'africastalking' | 'none'; status?: string; detail?: unknown };
+
+async function sendViaSmartSms(to: string, message: string): Promise<SmsResult> {
   const msidn = toIntl(to);
   const res = await fetch(`${SMARTSMS}/sendsms.json`, {
     method: 'POST',
@@ -49,25 +52,40 @@ async function sendViaSmartSms(to: string, message: string) {
   });
   const json = await readJson(res);
   const r = json?.response ?? {};
-  if (r.status === 'SUCCESS') { logger.debug({ to: msidn.slice(-4), totalsent: r.totalsent, cost: r.cost }, 'sms sent (smartsms)'); return; }
+  if (r.status === 'SUCCESS') {
+    logger.info({ to: msidn.slice(-4), totalsent: r.totalsent, cost: r.cost }, 'sms sent (smartsms)');
+    return { ok: true, provider: 'smartsms', status: r.status, detail: { totalsent: r.totalsent, cost: r.cost } };
+  }
   if (json) logger.error({ status: r.status, to: msidn.slice(-4) }, r.status === 'INSUFFICIENT_CREDIT'
     ? 'SmartSMS credit is too low: top up to resume SMS'
     : 'SmartSMS did not send the message');
+  return { ok: false, provider: 'smartsms', status: json ? r.status ?? 'UNKNOWN' : 'NON_JSON_RESPONSE', detail: json ? undefined : { httpStatus: res.status } };
 }
 
-export async function sendSms(to: string, message: string) {
+/** Never throws: SMS problems are logged (and returned) but don't break the request that triggered them. */
+export async function sendSms(to: string, message: string): Promise<SmsResult> {
   try {
     if (smartReady()) return await sendViaSmartSms(to, message);
     if (at) {
       const res = await at.SMS.send({ to: [to], message, ...(env.AT_SENDER_ID ? { from: env.AT_SENDER_ID } : {}) });
-      logger.debug({ res }, 'sms sent (africastalking)');
-      return;
+      logger.info({ res }, 'sms sent (africastalking)');
+      return { ok: true, provider: 'africastalking', detail: res };
     }
     if (isProd) logger.error('No SMS provider configured (set SMARTSMS_USERNAME and SMARTSMS_API_KEY); SMS not sent');
     else logger.info({ to, message }, '[DEV SMS]');
+    return { ok: false, provider: 'none', status: 'NOT_CONFIGURED' };
   } catch (err) {
     logger.error({ err }, 'sms failed');
+    return { ok: false, provider: smartReady() ? 'smartsms' : at ? 'africastalking' : 'none', status: 'EXCEPTION', detail: String((err as Error)?.message ?? err) };
   }
+}
+
+/** What's configured (no secrets): for the protected diagnostics route. */
+export function smsConfigSummary() {
+  return {
+    provider: smartReady() ? 'smartsms' : at ? 'africastalking' : 'none',
+    smartsmsUsernameSet: !!env.SMARTSMS_USERNAME, smartsmsApiKeySet: !!env.SMARTSMS_API_KEY, senderId: env.SMARTSMS_SENDER_ID,
+  };
 }
 
 /** Startup self-check (free): shows a wrong key, a blocked server or low credit in the logs right away. */
