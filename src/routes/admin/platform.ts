@@ -134,7 +134,10 @@ export function mountPlatform(r: Router) {
       if (b.maintenanceMode !== undefined) await setSetting('maintenance_mode', b.maintenanceMode, req.user.id);
       if (b.maintenanceMessage !== undefined) await setSetting('maintenance_message', b.maintenanceMessage, req.user.id);
       if (b.banner !== undefined) await setSetting('banner', b.banner, req.user.id);
-    } catch { throw badRequest('Apply migration 013_admin_tools.sql in Supabase to enable runtime settings', 'MIGRATION_REQUIRED'); }
+    } catch (err: any) {
+      if (/app_settings|relation|schema cache/i.test(err?.message ?? '')) throw badRequest('Apply migration 013_admin_tools.sql in Supabase to enable runtime settings', 'MIGRATION_REQUIRED');
+      throw badRequest(err?.message ?? 'Could not save settings');
+    }
     await audit(req, 'settings.update', 'settings', null, b);
     res.json({ settings: await getSettings(true) });
   });

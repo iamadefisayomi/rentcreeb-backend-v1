@@ -33,7 +33,10 @@ export async function getSettings(fresh = false): Promise<Settings> {
 }
 
 export async function setSetting(key: 'maintenance_mode' | 'maintenance_message' | 'banner', value: unknown, adminId: string) {
-  const { error } = await db.from('app_settings').upsert({ key, value: value ?? null, updated_by: adminId, updated_at: new Date().toISOString() });
+  // `value` is NOT NULL in the table: clearing a setting (e.g. removing the banner) deletes its row instead.
+  const { error } = value == null
+    ? await db.from('app_settings').delete().eq('key', key)
+    : await db.from('app_settings').upsert({ key, value, updated_by: adminId, updated_at: new Date().toISOString() });
   if (error) throw error;
   cache = null;
 }
