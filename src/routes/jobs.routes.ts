@@ -25,6 +25,18 @@ async function getJob(id: string) {
 }
 const mustBeAssigned = (job: any, userId: string) => { if (job.artisan_id !== userId) throw forbidden('Job not assigned to you'); };
 const mustOwn = (job: any, userId: string) => { if (job.landlord_id !== userId) throw forbidden(); };
+/**
+ * Whoever ordered the repair approves it: the tenant for a job raised from their maintenance request, otherwise the
+ * landlord. The landlord still pays (quotes, escrow, top-ups) and sees every step; they are told about each decision.
+ */
+export const approverOf = (job: { tenant_id?: string | null; landlord_id: string }) => job.tenant_id ?? job.landlord_id;
+const mustApprove = (job: any, userId: string) => {
+  if (approverOf(job) !== userId) throw forbidden(job.tenant_id ? 'The tenant who requested this repair approves it. You can follow every step here.' : undefined, 'NOT_APPROVER');
+};
+/** Keep the landlord in the loop when the tenant made the call. */
+const tellLandlord = async (job: any, actorId: string, title: string, body: string) => {
+  if (job.tenant_id && actorId !== job.landlord_id) await notify(job.landlord_id, 'maintenance_update', title, body, { jobId: job.id });
+};
 
 // ───────── Landlord: create / list / accept ─────────
 r.post('/', requireRole(...LANDLORDS), requireVerified, async (req, res) => {
@@ -87,11 +99,12 @@ r.get('/:id/quotes', requireRole(...LANDLORDS), async (req, res) => {
  * Landlord reviews the artisan's diagnosis/estimate before repairs begin:
  * approve, reject (artisan revises), or counter with a different amount the artisan can accept or decline.
  */
-r.post('/:id/report/:decision', requireRole(...LANDLORDS), async (req, res) => {
+r.post('/:id/report/:decision', async (req, res) => {
   const decisionParam = z.enum(['approve', 'reject', 'counter']).parse(req.params.decision);
   const { note, amountKobo } = z.object({ note: z.string().max(500).optional(), amountKobo: kobo.optional() }).parse(req.body ?? {});
   const job = await getJob(String(req.params.id));
-  mustOwn(job, req.user.id);
+  mustApprove(job, req.user.id);
+  const who = req.user.id === job.tenant_id ? 'tenant' : 'landlord';
   if (job.status !== 'awaiting_approval') throw badRequest('No report awaiting approval', 'BAD_STATE');
   if (decisionParam === 'counter') {
     if (!amountKobo) throw badRequest('Enter your counter-offer amount');
@@ -100,15 +113,17 @@ r.post('/:id/report/:decision', requireRole(...LANDLORDS), async (req, res) => {
     if (!rep) throw badRequest('No pending estimate to counter', 'BAD_STATE');
     if (amountKobo >= Number(rep.total_kobo)) throw badRequest('A counter-offer should be lower than the estimate — approve it instead');
     const naira = `₦${(amountKobo / 100).toLocaleString('en-NG')}`;
-    await logForJob(job, req.user.id, 'countered', `Landlord countered the estimate with ${naira}`);
-    await notify(job.artisan_id, 'report_countered', 'Counter-offer on your estimate', `${job.title}: the landlord offered ${naira}.${note ? ` “${note}”` : ''}`, { jobId: job.id });
+    await logForJob(job, req.user.id, 'countered', `${who === 'tenant' ? 'Tenant' : 'Landlord'} countered the estimate with ${naira}`);
+    await notify(job.artisan_id, 'report_countered', 'Counter-offer on your estimate', `${job.title}: the ${who} offered ${naira}.${note ? ` “${note}”` : ''}`, { jobId: job.id });
+    await tellLandlord(job, req.user.id, 'Tenant countered the repair estimate', `${job.title}: offered ${naira}.`);
     return res.json({ status: 'countered' });
   }
   const approve = decisionParam === 'approve';
   await db.from('job_reports').update({ status: approve ? 'approved' : 'rejected', review_note: note }).eq('job_id', job.id).eq('status', 'pending');
   await db.from('jobs').update({ status: approve ? 'approved' : 'diagnosing' }).eq('id', job.id);
-  await logForJob(job, req.user.id, approve ? 'approved' : 'changes_requested', approve ? 'Repair estimate approved' : (note ?? 'Landlord asked for a revised estimate'));
+  await logForJob(job, req.user.id, approve ? 'approved' : 'changes_requested', approve ? `Repair estimate approved by ${who}` : (note ?? `${who === 'tenant' ? 'Tenant' : 'Landlord'} asked for a revised estimate`));
   await notify(job.artisan_id, approve ? 'report_approved' : 'report_rejected', approve ? 'Approved! 🎉' : 'Diagnosis needs changes', approve ? 'You may begin the repair.' : note ?? 'Please revise your report.', { jobId: job.id });
+  await tellLandlord(job, req.user.id, approve ? 'Tenant approved the repair' : 'Tenant asked for a revised estimate', `${job.title}${note ? `: “${note}”` : ''}`);
   res.json({ status: approve ? 'approved' : 'diagnosing' });
 });
 
@@ -127,8 +142,9 @@ r.post('/:id/counter/:decision', requireRole('artisan'), async (req, res) => {
     await db.from('jobs').update({ status: 'diagnosing' }).eq('id', job.id);
   }
   await logForJob(job, req.user.id, accept ? 'counter_accepted' : 'counter_declined', accept ? 'Artisan accepted the counter-offer' : 'Artisan declined the counter-offer');
-  await notify(job.landlord_id, 'report_submitted', accept ? 'Counter-offer accepted' : 'Counter-offer declined',
+  await notify(approverOf(job), 'report_submitted', accept ? 'Counter-offer accepted' : 'Counter-offer declined',
     accept ? `${job.title}: the artisan will proceed at your price.` : `${job.title}: the artisan will send a revised estimate.`, { jobId: job.id });
+  await tellLandlord(job, approverOf(job), accept ? 'Counter-offer accepted' : 'Counter-offer declined', job.title);
   res.json({ status: accept ? 'approved' : 'diagnosing' });
 });
 
@@ -159,10 +175,10 @@ r.post('/:id/revision/:decision', requireRole(...LANDLORDS), requireVerified, as
   res.status(201).json({ revisionStatus: 'awaiting_payment', payment });
 });
 
-/** Tenant (or landlord) confirms the work → escrow released to artisan wallet minus 5% fee. */
+/** Whoever ordered the repair confirms the work → escrow released to artisan wallet minus 5% fee. */
 r.post('/:id/confirm-completion', async (req, res) => {
   const job = await getJob(String(req.params.id));
-  if (![job.tenant_id, job.landlord_id].includes(req.user.id)) throw forbidden();
+  mustApprove(job, req.user.id);
   if (job.status !== 'awaiting_confirmation') throw badRequest('Job is not awaiting confirmation', 'BAD_STATE');
   if (['pending', 'awaiting_payment'].includes(job.revision_status)) throw conflict('A revised amount is awaiting the landlord’s decision', 'REVISION_PENDING');
   const { data: e } = await db.from('escrows').select('id').eq('job_id', job.id).eq('kind', 'job').eq('status', 'held').maybeSingle();
@@ -170,7 +186,8 @@ r.post('/:id/confirm-completion', async (req, res) => {
   const released = await releaseEscrow(e.id);
   await db.from('jobs').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', job.id);
   if (job.maintenance_request_id) await db.from('maintenance_requests').update({ status: 'completed', resolved_at: new Date().toISOString() }).eq('id', job.maintenance_request_id);
-  await logForJob(job, req.user.id, 'resolved', 'Completion confirmed — payment released to artisan');
+  await logForJob(job, req.user.id, 'resolved', `Completion confirmed by ${req.user.id === job.tenant_id ? 'tenant' : 'landlord'} — payment released to artisan`);
+  await tellLandlord(job, req.user.id, 'Repair completed', `${job.title}: the tenant confirmed the work and the artisan has been paid.`);
   await notify(job.artisan_id, 'payment_released', 'Payment released! 🎉', `₦${((released!.amount_kobo - released!.fee_kobo) / 100).toLocaleString()} credited to your wallet.`, { jobId: job.id });
   res.json({ status: 'completed' });
 });
@@ -333,14 +350,15 @@ r.post('/:id/report', requireRole('artisan'), async (req, res) => {
   if (b.beforeMediaUrls.length) await db.from('job_media').insert(b.beforeMediaUrls.map((url) => ({ job_id: job.id, kind: 'before', url })));
   await db.from('jobs').update({ status: 'awaiting_approval' }).eq('id', job.id);
   await logForJob(job, req.user.id, 'estimate', `Artisan submitted repair estimate (₦${(total / 100).toLocaleString('en-NG')})`);
-  await notify(job.landlord_id, 'report_submitted', 'Diagnosis report submitted', 'Review and approve to let the artisan proceed.', { jobId: job.id });
+  await notify(approverOf(job), 'report_submitted', 'Diagnosis report submitted', 'Review and approve to let the artisan proceed.', { jobId: job.id });
+  if (job.tenant_id) await notify(job.landlord_id, 'maintenance_update', 'Diagnosis submitted', `${job.title}: waiting for the tenant to approve (₦${(total / 100).toLocaleString('en-NG')}).`, { jobId: job.id });
   res.status(201).json({ report });
 });
 
 r.post('/:id/begin-repair', requireRole('artisan'), async (req, res) => {
   const job = await getJob(String(req.params.id));
   mustBeAssigned(job, req.user.id);
-  if (job.status !== 'approved') throw badRequest('Landlord approval required first', 'BAD_STATE');
+  if (job.status !== 'approved') throw badRequest(job.tenant_id ? 'The tenant must approve the estimate first' : 'Landlord approval required first', 'BAD_STATE');
   await db.from('jobs').update({ status: 'in_progress' }).eq('id', job.id);
   res.json({ status: 'in_progress' });
 });

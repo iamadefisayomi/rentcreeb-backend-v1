@@ -9,6 +9,7 @@ import { signPrivateUrl } from '../lib/bunny';
 import { logger } from '../lib/logger';
 import { isTyping, presenceOf, setTyping } from '../services/presence';
 import { PRIVACY_DEFAULTS } from './support.routes';
+import { ensureConversation } from '../services/conversations';
 
 const r = Router();
 r.use(authenticate);
@@ -50,6 +51,38 @@ r.get('/', async (req, res) => {
   await attachContext(out);
   out.sort((x, y) => (y.lastMessage?.created_at ?? '').localeCompare(x.lastMessage?.created_at ?? ''));
   res.json({ conversations: out });
+});
+
+/**
+ * Open the chat for a booking or job straight from its screen ("Message artisan", "Message landlord" …), creating it
+ * if needed. `with` picks the other person on a job: the artisan talks to the landlord or the tenant; landlord and
+ * tenant talk to the artisan. Same shape as GET /:id.
+ */
+r.post('/open', async (req, res) => {
+  const b = z.object({ contextType: z.enum(['booking', 'job']), contextId: z.string().uuid(), with: z.enum(['landlord', 'tenant', 'artisan', 'host']).optional() }).parse(req.body);
+  const me = req.user.id;
+  let other: string | null = null;
+  if (b.contextType === 'booking') {
+    const { data: bk } = await db.from('bookings').select('tenant_id, host_id, status').eq('id', b.contextId).maybeSingle();
+    if (!bk) throw notFound('Booking not found');
+    if (![bk.tenant_id, bk.host_id].includes(me)) throw forbidden();
+    if (!['confirmed', 'completed'].includes(bk.status)) throw badRequest('Chat opens once the inspection is confirmed', 'CHAT_LOCKED');
+    other = me === bk.tenant_id ? bk.host_id : bk.tenant_id;
+  } else {
+    const { data: j } = await db.from('jobs').select('landlord_id, tenant_id, artisan_id').eq('id', b.contextId).maybeSingle();
+    if (!j) throw notFound('Job not found');
+    if (![j.landlord_id, j.tenant_id, j.artisan_id].includes(me)) throw forbidden();
+    if (!j.artisan_id) throw badRequest('Chat opens once an artisan is assigned', 'CHAT_LOCKED');
+    if (me === j.artisan_id) other = b.with === 'tenant' && j.tenant_id ? j.tenant_id : j.landlord_id;
+    else other = j.artisan_id;
+  }
+  if (!other || other === me) throw badRequest('There is no one to message here', 'CHAT_LOCKED');
+  const conv0 = await ensureConversation(b.contextType, b.contextId, me, other);
+  if (!conv0) throw badRequest('Could not open this chat. Please try again from Messages.', 'CHAT_UNAVAILABLE');
+  const { data: prof } = await db.from('profiles').select('id, first_name, last_name, avatar_url, nin_verified, role').eq('id', other).maybeSingle();
+  const conv: any = { id: conv0.id, contextType: b.contextType, contextId: b.contextId, other: prof };
+  await attachContext([conv]);
+  res.json({ conversation: conv });
 });
 
 /** One conversation with the other participant and its context (chat header; push deep links only carry the id). */

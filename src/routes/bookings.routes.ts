@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { ensureConversation } from '../services/conversations';
 import { z } from 'zod';
 import { env } from '../config/env';
 import { db, unwrap } from '../lib/supabase';
@@ -63,9 +64,7 @@ r.post('/:id/confirm', async (req, res) => {
   await verifyOtp({ purpose: 'booking_confirm', bookingId: b.id }, code);
 
   await db.from('bookings').update({ status: 'confirmed', confirmed_at: new Date().toISOString() }).eq('id', b.id);
-  await db.from('conversations').upsert(
-    { context_type: 'booking', context_id: b.id, participant_a: b.tenant_id, participant_b: b.host_id },
-    { onConflict: 'context_type,context_id' });
+  await ensureConversation('booking', b.id, b.tenant_id, b.host_id);
 
   // Second code, used at the property: tenant shows it to the host who validates it (Agent "OTP Validation for Inspection").
   const inspectionCode = await issueOtp({ purpose: 'booking_inspection', bookingId: b.id });

@@ -8,6 +8,7 @@ import { sendSms } from '../lib/sms';
 import { notify } from './notify';
 import { settleRent } from './rent';
 import { logForJob } from './maintenance';
+import { ensureConversation } from './conversations';
 
 /**
  * Single entry point for confirming a Paystack payment (webhook AND client-side verify).
@@ -95,9 +96,9 @@ async function onJobEscrow(p: any) {
   await db.from('jobs').update({ status: 'assigned', artisan_id: q.artisan_id, accepted_quote_id: q.id }).eq('id', job.id);
   if (job.maintenance_request_id) await db.from('maintenance_requests').update({ status: 'in_progress' }).eq('id', job.maintenance_request_id);
   await logForJob(job, null, 'assigned', 'Artisan assigned — escrow funded');
-  await db.from('conversations').upsert(
-    { context_type: 'job', context_id: job.id, participant_a: job.landlord_id, participant_b: q.artisan_id },
-    { onConflict: 'context_type,context_id' });
+  await ensureConversation('job', job.id, job.landlord_id, q.artisan_id);
+  // A repair the tenant asked for: they approve the work, so they get their own chat with the artisan.
+  if (job.tenant_id) await ensureConversation('job', job.id, job.tenant_id, q.artisan_id);
   await notify(q.artisan_id, 'quote_accepted', 'Your quote was accepted! 🎉', `${job.title} — payment is held in escrow.`, { jobId: job.id });
 }
 

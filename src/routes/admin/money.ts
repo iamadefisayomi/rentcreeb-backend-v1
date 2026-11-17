@@ -103,7 +103,7 @@ export function mountMoney(r: Router) {
     const [payments, escrows, conv, reports, notes] = await Promise.all([
       db.from('payments').select('id, reference, amount_kobo, status, channel, paid_at, created_at').eq('booking_id', id),
       db.from('escrows').select('*').eq('booking_id', id),
-      db.from('conversations').select('id').eq('context_type', 'booking').eq('context_id', id).maybeSingle(),
+      db.from('conversations').select('id').eq('context_type', 'booking').eq('context_id', id).order('created_at').limit(1).maybeSingle(),
       db.from('reports').select('id, reason, status, created_at').eq('booking_id', id),
       notesFor('booking', id),
     ]);
@@ -327,7 +327,7 @@ export function mountMoney(r: Router) {
       db.from('job_quotes').select('id, amount_kobo, status, eta, notes, created_at, artisan:profiles!job_quotes_artisan_id_fkey(id, first_name, last_name)').eq('job_id', id),
       db.from('escrows').select('*').eq('job_id', id),
       db.from('job_media').select('kind, url').eq('job_id', id),
-      db.from('conversations').select('id').eq('context_type', 'job').eq('context_id', id).maybeSingle(),
+      db.from('conversations').select('id').eq('context_type', 'job').eq('context_id', id).order('created_at').limit(1).maybeSingle(), // landlord↔artisan first; a tenant chat may follow
       notesFor('job', id),
     ]);
     res.json({ job: j, quotes: quotes.data ?? [], escrows: escrows.data ?? [], media: media.data ?? [], conversationId: conv.data?.id ?? null, notes });

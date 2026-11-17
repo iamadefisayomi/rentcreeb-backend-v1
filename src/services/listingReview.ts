@@ -16,10 +16,12 @@ import { getSettings } from './settings';
  * 1. Rule checks the AI cannot talk its way around (owner standing, photos on our own storage, no contact details in the
  *    text, price in a sensible range against similar live listings, no reused photos).
  * 2. One AI call with the listing text and up to 4 photos (does it look genuine and consistent, any scam signs).
- * 3. Approve automatically only when every rule passes AND the AI approves with high confidence. Anything else stays
- *    pending for an admin, with the findings attached. It never rejects on its own.
+ * 3. Approve automatically when nothing looks suspicious: every hard rule passes AND the AI approves. Quality hints
+ *    (fewer than 3 photos, a short description) are recorded for the admin but never hold a listing back on their own.
+ *    Anything suspicious stays pending for an admin, with the findings attached. It never rejects on its own.
  */
-export type Check = { key: string; ok: boolean; label: string; detail?: string };
+/** `soft` checks are quality hints shown to admins; they do not block auto-approval. */
+export type Check = { key: string; ok: boolean; label: string; detail?: string; soft?: boolean };
 export type ListingReview = {
   version: 1; at: string; model: string | null;
   decision: 'auto_approved' | 'needs_admin' | 'error';
@@ -34,7 +36,8 @@ export type ListingReview = {
 const MAX_AI_ATTEMPTS = 3;
 
 const MIN_PHOTOS = 3;
-const MIN_CONFIDENCE = 0.8;
+/** The AI must say "approve"; this only stops a hesitant approve (it reports low confidence when it is guessing). */
+const MIN_CONFIDENCE = 0.6;
 const CONTACT = /(\+?234|\b0)[789][01]\d[\s-]?\d{3}[\s-]?\d{4}\b|\b\d{11}\b|[\w.+-]+@[\w-]+\.[\w.]+|https?:\/\/|www\.|\bwa\.me\b|whats\s?app|telegram|\bcall me\b|\bdm me\b/i;
 
 const median = (xs: number[]) => { const s = [...xs].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
@@ -42,7 +45,7 @@ const naira = (k: number) => `₦${Math.round(k / 100).toLocaleString('en-NG')}`
 
 async function ruleChecks(p: any, media: any[]): Promise<Check[]> {
   const checks: Check[] = [];
-  const add = (key: string, ok: boolean, label: string, detail?: string) => checks.push({ key, ok, label, detail });
+  const add = (key: string, ok: boolean, label: string, detail?: string, soft?: boolean) => checks.push({ key, ok, label, detail, ...(soft ? { soft } : {}) });
 
   // Owner in good standing
   const { data: owner } = await db.from('profiles').select('nin_verified, is_suspended, deleted_at, created_at').eq('id', p.owner_id).maybeSingle();
@@ -53,7 +56,9 @@ async function ruleChecks(p: any, media: any[]): Promise<Check[]> {
 
   // Photos: enough, uploaded through our storage (not stock / copied from other sites), not reused by another listing
   const images = media.filter((m) => m.media_type !== 'video');
-  add('photo_count', images.length >= MIN_PHOTOS, `At least ${MIN_PHOTOS} photos`, `${images.length} photo${images.length === 1 ? '' : 's'}`);
+  // At least one photo is required for the AI to judge the listing; fewer than MIN_PHOTOS is only a quality hint.
+  add('photo_any', images.length > 0, 'Has at least one photo');
+  add('photo_count', images.length >= MIN_PHOTOS, `At least ${MIN_PHOTOS} photos`, `${images.length} photo${images.length === 1 ? '' : 's'}`, true);
   const foreign = images.filter((m) => !String(m.url).startsWith(env.BUNNY_CDN_URL + '/'));
   add('photo_source', images.length > 0 && foreign.length === 0, 'Photos were uploaded in the app', foreign.length ? `${foreign.length} from other websites (e.g. ${new URL(foreign[0].url).host})` : undefined);
   if (images.length) {
@@ -64,7 +69,7 @@ async function ruleChecks(p: any, media: any[]): Promise<Check[]> {
   // Text
   const text = `${p.title ?? ''}\n${p.description ?? ''}\n${p.landmark ?? ''}`;
   add('contact_in_text', !CONTACT.test(text), 'No phone numbers, emails or links in the text', CONTACT.test(text) ? 'Contact details must go through the app' : undefined);
-  add('description', String(p.description ?? '').trim().length >= 60, 'Description is at least 60 characters');
+  add('description', String(p.description ?? '').trim().length >= 60, 'Description is at least 60 characters', undefined, true);
 
   // Price against similar live listings (same type, period, bedrooms, in the same area or city)
   const price = Number(p.price_kobo);
@@ -112,7 +117,9 @@ Check:
 - Prohibited content (hate, sexual content, illegal activity).
 
 Give one entry per photo in "photos" (index 0 first), a confidence from 0.0 to 1.0, a one or two sentence summary for an admin, and short issues.
-Use "approve" only if everything looks genuine and consistent. When unsure, use "needs_review".`;
+Use "approve" when nothing looks suspicious: the photos plausibly show this property and there are no scam signs, mismatches or prohibited content.
+Ordinary quality issues (dim or blurry photos, few photos, a short or plain description, missing amenities, typos) are NOT reasons to hold a listing back: approve and mention them in "issues".
+Use "needs_review" only for a concrete problem a person should look at, and say what it is in "issues". Mark a photo "ok": false only when that photo itself is suspicious or wrong for the listing, not just low quality.`;
   let r: any = null;
   if (claudeEnabled()) {
     // Structured outputs: the API returns exactly the review schema, so there is nothing to repair.
@@ -163,7 +170,7 @@ export async function reviewListing(propertyId: string, opts: { apply: boolean }
   }
   await stage('deciding');
 
-  for (const c of review.checks) if (!c.ok) review.reasons.push(c.label + (c.detail ? ` (${c.detail})` : ''));
+  for (const c of review.checks) if (!c.ok && !c.soft) review.reasons.push(c.label + (c.detail ? ` (${c.detail})` : ''));
   if (!aiEnabled()) review.reasons.push('AI is not configured');
   else if (!review.ai) review.reasons.push('The AI check did not return a result');
   else {
