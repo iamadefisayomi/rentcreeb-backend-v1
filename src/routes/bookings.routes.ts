@@ -9,6 +9,8 @@ import { issueOtp, verifyOtp } from '../lib/otp';
 import { sendSms } from '../lib/sms';
 import { authenticate, requireRole, requireVerified } from '../middleware/auth';
 import { createPayment } from '../services/payments';
+import { confirmPayment } from '../services/paymentProcessor';
+import { paystack } from '../lib/paystack';
 import { refundEscrow, releaseEscrow } from '../services/escrow';
 import { notify } from '../services/notify';
 
@@ -54,6 +56,31 @@ r.get('/', async (req, res) => {
 });
 
 r.get('/:id', async (req, res) => res.json({ booking: await getBooking(String(req.params.id), req.user.id) }));
+
+/**
+ * Pay for a booking that is still waiting for payment (from My Bookings or the property page).
+ * Reuses the booking's open Paystack checkout so the tenant can never pay twice for one booking; if Paystack says it
+ * was already paid, settles it now. A new checkout is only started when the previous one failed outright.
+ */
+r.post('/:id/pay', requireRole('tenant'), async (req, res) => {
+  const b = await getBooking(String(req.params.id), req.user.id);
+  if (b.tenant_id !== req.user.id) throw forbidden();
+  if (b.status === 'expired') throw badRequest('This booking expired before it was paid. Please book a new inspection time.', 'BOOKING_EXPIRED');
+  if (b.status !== 'pending_payment') throw badRequest('This booking is already paid', 'ALREADY_PAID');
+  const { data: last } = await db.from('payments').select('id, reference, access_code, status, amount_kobo')
+    .eq('booking_id', b.id).eq('purpose', 'inspection').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (last?.status === 'success') { await confirmPayment(last.reference); return res.json({ status: 'paid' }); }
+  if (last?.status === 'pending' && last.access_code) {
+    let tx: { status: string } | null = null;
+    try { tx = await paystack.verify(last.reference); } catch { /* not reachable / never opened: reuse the checkout */ }
+    if (tx?.status === 'success') { await confirmPayment(last.reference); return res.json({ status: 'paid' }); }
+    if (tx?.status !== 'failed' && tx?.status !== 'reversed')
+      return res.json({ payment: { paymentId: last.id, reference: last.reference, authorizationUrl: `https://checkout.paystack.com/${last.access_code}`, accessCode: last.access_code, amountKobo: Number(last.amount_kobo) } });
+    await db.from('payments').update({ status: 'failed' }).eq('id', last.id).eq('status', 'pending');
+  }
+  const payment = await createPayment(req.user, 'inspection', Number(b.amount_kobo), { booking_id: b.id });
+  res.json({ payment });
+});
 
 /** Step 7: tenant enters OTP (sent to tenant + host) → booking confirmed, chat unlocked. */
 r.post('/:id/confirm', async (req, res) => {

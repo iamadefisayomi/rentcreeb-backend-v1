@@ -205,6 +205,12 @@ export async function reviewListing(propertyId: string, opts: { apply: boolean }
     listing_updated_at: p.updated_at, decision: review.decision, attempts: review.attempts, review,
   });
   logger.info({ propertyId: p.id, decision: review.decision, reasons: review.reasons.length, confidence: review.ai?.confidence }, 'listing reviewed');
+  // The lister sees the report straight away (Listing details), and gets a notification when it still needs a person.
+  if (opts.apply && !approved && !retryLater && p.status === 'pending') {
+    const required = ownerFindings(review).fixes.filter((f) => f.required).length;
+    await notify(p.owner_id, 'listing_review', required ? 'Your listing needs changes' : 'Listing checked: waiting for a reviewer',
+      required ? `We found ${required} thing${required === 1 ? '' : 's'} to fix on "${p.title}". Tap to see the report.` : `"${p.title}" passed the automatic checks. A reviewer will take a quick look.`, { propertyId: p.id });
+  }
   return review;
 }
 
@@ -285,4 +291,70 @@ export async function liveListingReviews() {
       summary: r.review?.ai?.summary ?? null, reasons: (r.review?.reasons ?? []).slice(0, 3) })),
     queue: { waiting: waiting.length, running: active, maxConcurrent: env.AI_CONCURRENCY },
   };
+}
+
+// ───────── What the lister sees ─────────
+/** Plain-language fix for each rule check, shown to the person who uploaded the listing. */
+const OWNER_FIX: Record<string, (c: Check) => string> = {
+  owner_verified: () => 'Verify your NIN in Settings. Only verified owners can have listings approved.',
+  owner_standing: () => 'Your account is restricted. Contact RentCreeb support.',
+  owner_reports: () => 'There are open reports on your account. Our team will look at them before this listing goes live.',
+  photo_any: () => 'Add at least one photo of the property.',
+  photo_count: () => `Add at least ${MIN_PHOTOS} photos. Listings with more photos get more bookings.`,
+  photo_source: () => 'Take or upload your photos in the app. Photos copied from other websites are not accepted.',
+  photo_unique: () => 'One or more of your photos is already used by another listing. Use your own photos of this property.',
+  contact_in_text: () => 'Remove phone numbers, emails and links from the title and description. Renters reach you through the app.',
+  description: () => 'Write a fuller description (at least 60 characters): rooms, condition, what is nearby.',
+  price: (c) => `Check your price: it looks unusual for similar listings${c.detail ? ` (${c.detail})` : ''}.`,
+  duplicate: () => 'This looks like a copy of a listing that is already live.',
+};
+
+export type OwnerListingReport = {
+  state: 'none' | 'checking' | 'approved' | 'needs_admin' | 'rejected';
+  title: string;
+  summary: string;
+  /** Things the lister should change; `required` ones keep it from going live. */
+  fixes: { text: string; required: boolean }[];
+  /** What the automatic check looked at and passed. */
+  passed: string[];
+  aiSummary: string | null;
+  rejectionReason: string | null;
+  checkedAt: string | null;
+};
+
+function ownerFindings(review: ListingReview | null) {
+  const fixes: OwnerListingReport['fixes'] = [];
+  const passed: string[] = [];
+  for (const c of review?.checks ?? []) {
+    if (c.ok) { if (!c.soft) passed.push(c.label); continue; }
+    fixes.push({ text: (OWNER_FIX[c.key] ?? (() => c.label))(c), required: !c.soft });
+  }
+  const ai = review?.ai;
+  if (ai) {
+    for (const ph of ai.photos) if (!ph.ok) fixes.push({ text: `Photo ${ph.index + 1}: ${ph.note || 'does not look like this property'}`, required: ai.verdict !== 'approve' });
+    const notes = new Set(ai.photos.map((ph) => ph.note).filter(Boolean));
+    // With an "approve" verdict the AI's issues are only suggestions (dim photos, short text...).
+    for (const i of ai.issues) if (!notes.has(i)) fixes.push({ text: i, required: ai.verdict !== 'approve' });
+  }
+  return { fixes, passed };
+}
+
+/** The review report for the listing's owner: their listing's state, what to fix and what passed. */
+export async function ownerListingReport(p: any): Promise<OwnerListingReport> {
+  const { data: row } = await db.from('listing_ai_reviews').select('status, review, listing_updated_at, finished_at').eq('property_id', p.id).maybeSingle();
+  const review = (row?.review ?? null) as ListingReview | null;
+  const { fixes, passed } = ownerFindings(review);
+  const base = { fixes, passed, aiSummary: review?.ai?.summary ?? null, rejectionReason: p.rejection_reason ?? null, checkedAt: row?.finished_at ?? null };
+  if (p.status === 'approved' || p.status === 'rented' || p.status === 'paused')
+    return { ...base, state: 'approved', title: 'Approved', summary: 'Your listing passed the checks and is live.' };
+  if (p.status === 'rejected')
+    return { ...base, state: 'rejected', title: 'Listing rejected', summary: p.rejection_reason ? `A reviewer rejected this listing: ${p.rejection_reason}` : 'A reviewer rejected this listing. Fix the points below and resubmit.' };
+  if (p.status !== 'pending') return { ...base, state: 'none', title: 'Not submitted', summary: 'Submit the listing to have it checked.' };
+  const stale = !row || row.status !== 'done' || !row.listing_updated_at || Date.parse(row.listing_updated_at) < Date.parse(p.updated_at);
+  if (stale) return { ...base, fixes: [], passed: [], aiSummary: null, state: 'checking', title: 'Checking your listing', summary: 'We are checking your photos, text and price now. This usually takes under a minute.' };
+  const required = fixes.filter((f) => f.required).length;
+  return { ...base, state: 'needs_admin', title: required ? 'Needs changes' : 'Waiting for a reviewer',
+    summary: required
+      ? `We found ${required} thing${required === 1 ? '' : 's'} to fix before this listing can go live. Edit the listing and it will be checked again.`
+      : 'Nothing wrong was found automatically. A RentCreeb reviewer will take a quick look, usually within 24 hours.' };
 }

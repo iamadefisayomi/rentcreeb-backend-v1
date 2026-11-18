@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { db } from '../lib/supabase';
 import { logger } from '../lib/logger';
 import { notify } from '../services/notify';
-import { deleteFromBunny } from '../lib/bunny';
+import { purgeVerificationEvidence } from '../services/verificationEvidence';
 import { reviewPendingListings } from '../services/listingReview';
 
 /**
@@ -13,11 +13,13 @@ export function startScheduler() {
   // Every minute: AI + rule review of listings waiting for approval (auto-approves the ones that fully pass).
   cron.schedule('* * * * *', () => { void reviewPendingListings(); });
 
-  // Every 10 min: expire unpaid bookings (30 min window) and stale OTPs.
+  // Every 10 min: expire unpaid bookings and stale OTPs. An unpaid booking can be paid later from My Bookings or the
+  // property page for up to 24 hours, but never closer than 2 hours to the inspection (same rule as booking it).
   cron.schedule('*/10 * * * *', async () => {
     try {
-      const cutoff = new Date(Date.now() - 30 * 60000).toISOString();
-      await db.from('bookings').update({ status: 'expired' }).eq('status', 'pending_payment').lt('created_at', cutoff);
+      const cutoff = new Date(Date.now() - 24 * 3600000).toISOString();
+      const tooLate = new Date(Date.now() + 2 * 3600000).toISOString();
+      await db.from('bookings').update({ status: 'expired' }).eq('status', 'pending_payment').or(`created_at.lt.${cutoff},scheduled_at.lt.${tooLate}`);
       await db.from('otp_codes').delete().lt('expires_at', new Date(Date.now() - 86400000).toISOString());
     } catch (err) { logger.error({ err }, 'cron: bookings/otp cleanup failed'); }
   });
@@ -54,16 +56,11 @@ export function startScheduler() {
       }
     } catch (err) { logger.error({ err }, 'cron: lease terminations failed'); }
 
-    // ID evidence (selfies, ID photos) kept for admin review is deleted 30 days after the check, unless it is still being reviewed.
+    // ID evidence (selfies, ID photos, the NIN response and NIMC pictures) kept for admin review is deleted 30 days
+    // after the check, unless it is still being reviewed.
     try {
       const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
-      const { data: old, error } = await db.from('verifications').select('id, selfie_path, document_path').neq('status', 'manual_review').lt('created_at', cutoff)
-        .or('selfie_path.not.is.null,document_path.not.is.null').limit(500);
-      if (!error) for (const v of old ?? []) {
-        if (v.selfie_path) await deleteFromBunny(v.selfie_path, true);
-        if (v.document_path) await deleteFromBunny(v.document_path, true);
-        await db.from('verifications').update({ selfie_path: null, document_path: null }).eq('id', v.id);
-      }
+      await purgeVerificationEvidence((q) => q.neq('status', 'manual_review').lt('created_at', cutoff));
     } catch (err) { logger.error({ err }, 'cron: verification evidence purge failed'); }
   });
 }

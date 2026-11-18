@@ -364,7 +364,7 @@
       view(tabs([['manual_review', 'Needs review', c.manual_review], ['failed', 'Failed', c.failed], ['success', 'Passed', c.success]], tab, function (t) { return '/verifications?tab=' + t; }) +
         '<div class="card">' + table(['Person', 'Why it is here', 'Face score', 'Evidence', 'NIN', 'Submitted'], j.verifications, function (v) {
           var u = v.user || {};
-          var ev = (v.hasSelfie ? badge('Selfie', 'ok') : '') + (v.hasDocument ? badge(DOC[v.document_type] || 'ID', 'ok') : '') + (v.metadata && v.metadata.nimc_name ? badge('NIMC name', 'grey') : '');
+          var ev = (v.hasSelfie ? badge('Selfie', 'ok') : '') + (v.hasNimcPhoto ? badge('NIMC photo', 'ok') : '') + (v.hasNimcResponse ? badge('NIN response', 'grey') : '') + (v.hasDocument ? badge(DOC[v.document_type] || 'ID', 'ok') : '') + (v.metadata && v.metadata.nimc_name ? badge('NIMC name', 'grey') : '');
           return '<tr class="click" data-go="#/verifications/' + esc(v.id) + '"><td><div class="row">' + avatar(u) + '<div><b>' + name(u) + '</b><div class="faint">' + label(u.role) + ' · ' + esc(u.phone || u.email || '') + '</div></div></div></td>' +
             '<td>' + reasonBadge(v) + (v.metadata && v.metadata.note ? '<div class="faint">“' + esc(String(v.metadata.note).slice(0, 80)) + '”</div>' : '') + '</td>' +
             '<td class="num">' + (v.confidence != null ? Math.round(Number(v.confidence)) + '%' : '—') + '</td><td><div class="chips">' + (ev || '<span class="faint">none</span>') + '</div></td>' +
@@ -390,9 +390,28 @@
       var warnings = (j.sameNinOtherAccounts || []).length ? '<div class="alert bad"><b>This NIN was also used by another account:</b> ' + j.sameNinOtherAccounts.map(function (x) { return userLink(x.user); }).join(', ') + '. Approving is blocked if that account is already verified.</div>' : '';
       if (u.nin_verified) warnings += '<div class="alert ok">This account is already NIN-verified.</div>';
       if (u.is_suspended) warnings += '<div class="alert warn">This account is suspended.</div>';
-      if (!e.selfieUrl && !e.documentUrl) warnings += '<div class="alert info">No photos were kept for this check (older checks, or the person sent none). Ask them to submit a manual review with a photo of their ID from the app, or verify them on a video call.</div>';
+      var nimcImgs = e.nimcImages || [];
+      // The NIN check response, flattened into rows (pictures are shown with the evidence, so they are placeholders here).
+      var flat = function (o, pre, out) {
+        Object.keys(o || {}).forEach(function (k) {
+          var val = o[k], key = pre ? pre + '.' + k : k;
+          if (val && typeof val === 'object' && !Array.isArray(val)) flat(val, key, out);
+          else if (Array.isArray(val) && val.some(function (x) { return x && typeof x === 'object'; })) val.forEach(function (x, i) { if (x && typeof x === 'object') flat(x, key + '[' + i + ']', out); else out.push([key + '[' + i + ']', x]); });
+          else out.push([key, Array.isArray(val) ? val.join(', ') : val]);
+        });
+        return out;
+      };
+      var nimcRows = e.nimcResponse ? flat(e.nimcResponse, '', []) : [];
+      var nimcSection = e.nimcResponse
+        ? section('NIN verification response', '<p class="muted" style="margin:0">Everything the NIN check returned for this attempt (Bytid / NIMC). Pictures are shown with the evidence above.</p>' +
+            '<div style="max-height:460px;overflow:auto">' + kv(nimcRows.map(function (x) { return [x[0].replace(/_/g, ' '), x[1] == null || x[1] === '' ? '' : '<span style="word-break:break-word">' + esc(String(x[1])) + '</span>']; })) + '</div>' +
+            '<details><summary class="faint" style="cursor:pointer">Raw JSON</summary><pre style="white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;font-size:12px">' + esc(JSON.stringify(e.nimcResponse, null, 2)) + '</pre></details>')
+        : '';
+      if (!e.selfieUrl && !e.documentUrl && !nimcImgs.length) warnings +='<div class="alert info">No photos were kept for this check (older checks, or the person sent none). Ask them to submit a manual review with a photo of their ID from the app, or verify them on a video call.</div>';
       view('<div class="stack">' + warnings + '<div class="grid cols-2">' +
-        section('Evidence', '<div class="evidence">' + fig(e.selfieUrl, 'Selfie', v.confidence != null ? 'face score ' + Math.round(v.confidence) + '%' : '') + fig(e.documentUrl, DOC[e.documentType] || 'ID document', '', e.documentIsPdf) +
+        section('Evidence', '<div class="evidence">' + fig(e.selfieUrl, 'Selfie', v.confidence != null ? 'face score ' + Math.round(v.confidence) + '%' : '') +
+          nimcImgs.map(function (x, i) { return fig(x.url, i === 0 && !/signature/i.test(x.field) ? 'NIMC ID photo' : /signature/i.test(x.field) ? 'NIMC signature' : 'NIMC picture', 'from the NIN check · ' + x.field); }).join('') +
+          (e.documentUrl || !nimcImgs.length ? fig(e.documentUrl, DOC[e.documentType] || 'ID document', '', e.documentIsPdf) : '') +
           (safeUrl(u.avatar_url) ? fig(u.avatar_url, 'Profile photo', 'on the account') : '') + '</div><div class="faint">Photos open full size in a new tab. Links expire after 10 minutes; they are deleted once you decide.</div>') +
         '<div class="stack">' + section('Does it match the account?',
           '<div class="compare"><div><div class="label">Name on the account</div><div class="value">' + name(u) + '</div></div><div><div class="label">Name on the NIMC record</div><div class="value">' + (meta.nimc_name ? esc(meta.nimc_name) : '<span class="faint">not available</span>') + '</div></div></div>' +
@@ -404,6 +423,7 @@
           '<div class="row"><a class="btn sm" href="#/users/' + esc(u.id) + '">Open account →</a></div>') +
         section('Decision', open ? '<p class="muted" style="margin:0">Approve only if the selfie is clearly the same person as the ID photo, and the names agree.</p><div class="row"><button class="btn ok" id="v-ok">Approve: verify identity</button><button class="btn ghost-danger" id="v-no">Reject</button></div>'
           : '<div class="row">' + statusBadge(v.status) + '<span class="muted">This check is closed.</span>' + (!u.nin_verified ? '<button class="btn sm" id="v-reset">Reset attempts so they can retry</button>' : '') + '</div>') + '</div></div>' +
+        nimcSection +
         section('All checks for this person', table(['Status', 'Reason', 'Score', 'Counts toward limit', 'When', 'Note'], j.history, function (h) {
           return '<tr' + (h.id === v.id ? ' style="font-weight:600"' : ' class="click" data-go="#/verifications/' + esc(h.id) + '"') + '><td>' + statusBadge(h.status) + '</td><td>' + reasonBadge(h) + '</td><td class="num">' + (h.confidence != null ? Math.round(h.confidence) + '%' : '—') + '</td><td>' + (h.status === 'failed' ? (h.counts_as_attempt === false ? 'No' : 'Yes') : '—') + '</td><td class="num">' + when(h.created_at) + '</td><td class="faint">' + esc(h.review_note || '') + '</td></tr>';
         })) + '</div>');

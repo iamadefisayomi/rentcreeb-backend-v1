@@ -6,7 +6,7 @@ import { env } from '../config/env';
 import { db } from '../lib/supabase';
 import { badRequest, conflict, HttpError } from '../lib/errors';
 import { boolish } from '../lib/common';
-import { verifyNinWithSelfie } from '../lib/bytid';
+import { verifyNinWithSelfie, type NimcImage } from '../lib/bytid';
 import { uploadToBunny } from '../lib/bunny';
 import { logger } from '../lib/logger';
 import { authenticate } from '../middleware/auth';
@@ -30,12 +30,35 @@ async function failedAttempts(userId: string) {
 async function insertVerification(row: Record<string, unknown>) {
   const { data, error } = await db.from('verifications').insert(row).select('id').single();
   if (!error) return data;
+  if (/nimc_record|nimc_files|column/i.test(error.message) && ('nimc_record' in row || 'nimc_files' in row)) {
+    const { nimc_record: _r, nimc_files: _f, ...rest } = row; // migration 017 not applied yet
+    return insertVerification(rest);
+  }
   if (/selfie_path|document_path|document_type|column/i.test(error.message)) {
     const { selfie_path: _s, document_path: _d, document_type: _t, ...rest } = row;
     const retry = await db.from('verifications').insert(rest).select('id').single();
     if (!retry.error) return retry.data;
   }
   throw error;
+}
+
+const sniffImage = (b: Buffer) => b[0] === 0xff && b[1] === 0xd8 ? 'image/jpeg' : b[0] === 0x89 && b[1] === 0x50 ? 'image/png' : b.slice(8, 12).toString() === 'WEBP' ? 'image/webp' : b[0] === 0x47 && b[1] === 0x49 ? 'image/gif' : null;
+/** Store the pictures from the NIN response (the NIMC ID photo …) privately for the admin reviewer. Never blocks the user. */
+async function keepNimcImages(userId: string, images: NimcImage[]) {
+  const out: { field: string; path: string; type: string }[] = [];
+  for (const [i, img] of images.slice(0, 4).entries()) {
+    try {
+      let buf: Buffer | null = null;
+      if (img.base64) buf = Buffer.from(img.base64, 'base64');
+      else if (img.url) { const r = await fetch(img.url, { signal: AbortSignal.timeout(15_000) }); if (r.ok) buf = Buffer.from(await r.arrayBuffer()); }
+      const type = buf ? sniffImage(buf) : null;
+      if (!buf || !type || buf.length > 8 * 1024 * 1024) continue;
+      const ext = type.split('/')[1].replace('jpeg', 'jpg');
+      const { path } = await uploadToBunny(buf, `verification/${userId}`, `nimc-${i}.${ext}`, true, type);
+      out.push({ field: img.field, path, type });
+    } catch (err) { logger.warn({ err, field: img.field }, 'could not keep NIMC picture for review'); }
+  }
+  return out;
 }
 
 const IMAGE = /^image\/(jpeg|jpg|png|webp|heic|heif)$/i;
@@ -59,8 +82,8 @@ r.get('/status', async (req, res) => {
 });
 
 /**
- * multipart/form-data: nin, consent, selfie (image). The selfie is forwarded to Bytid. It is only kept (privately) when the
- * result needs a person to look at it (close match or mismatch), and deleted once an admin decides or after 30 days.
+ * multipart/form-data: nin, consent, selfie (image). The selfie is forwarded to Bytid. The selfie, the full response and the
+ * NIMC ID photo are kept privately for the admin ID review page, and deleted once an admin decides or after 30 days.
  */
 r.post('/nin', upload.single('selfie'), async (req, res) => {
   const { nin, consent } = z.object({ nin: z.string().regex(/^\d{11}$/, 'NIN must be 11 digits'), consent: boolish }).parse(req.body);
@@ -82,17 +105,21 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
     // The NIMC name is kept so a reviewer can compare it with the name on the account (no other NIN data is stored).
     const meta = { face_match: (result.raw as any)?.face_match?.status, request_id: (result.raw as any)?.request_id,
       nimc_name: [result.firstName, result.lastName].filter(Boolean).join(' ') || undefined };
+    // Evidence for the admin page: the selfie, the full NIN response and the NIMC ID photo. Private; deleted once an
+    // admin decides or after 30 days (scheduler).
+    const [selfie_path, nimc_files] = await Promise.all([keepForReview(req.user.id, req.file, 'selfie'), keepNimcImages(req.user.id, result.images)]);
+    const evidence = { selfie_path, nimc_record: result.response, nimc_files };
     if (!result.match || result.confidence < env.BYTID_MIN_CONFIDENCE) {
-      const selfie_path = await keepForReview(req.user.id, req.file, 'selfie');
       // Close calls (old NIMC photo, poor light) go to a person instead of locking the user out.
       if (result.confidence >= env.BYTID_REVIEW_SCORE) {
-        await insertVerification({ ...record, status: 'manual_review', confidence: result.confidence, failure_reason: 'FACE_BORDERLINE', metadata: meta, selfie_path });
+        await insertVerification({ ...record, status: 'manual_review', confidence: result.confidence, failure_reason: 'FACE_BORDERLINE', metadata: meta, ...evidence });
         return res.status(202).json({ status: 'in_review', message: 'Your selfie was a close match. Our team will review it and confirm by email, usually within 24 hours.' });
       }
-      await insertVerification({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH', metadata: meta, selfie_path });
+      await insertVerification({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH', metadata: meta, ...evidence });
       throw new HttpError(422, 'We could not match your selfie to your NIN record', 'FACE_MISMATCH', { attemptsRemaining: Math.max(0, env.NIN_MAX_ATTEMPTS - used - 1) });
     }
-    await db.from('verifications').insert({ ...record, status: 'success', confidence: result.confidence, metadata: meta });
+    await insertVerification({ ...record, status: 'success', confidence: result.confidence, metadata: meta, ...evidence })
+      .catch((err) => logger.error({ err }, 'could not save the successful NIN check'));
     await db.from('profiles').update({ nin_verified: true, updated_at: new Date().toISOString() }).eq('id', req.user.id);
     await notify(req.user.id, 'verified', 'Identity verified ✅', 'You now have full access to RentCreeb.');
     res.json({ status: 'verified', ninLast3: nin.slice(-3) });

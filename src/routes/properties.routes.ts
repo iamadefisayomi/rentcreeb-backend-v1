@@ -8,7 +8,7 @@ import { deleteFromBunny, signPrivateUrl } from '../lib/bunny';
 import { env } from '../config/env';
 import { responseTime } from '../services/responseTime';
 
-import { queueIfPending, queueListingReview } from '../services/listingReview';
+import { ownerListingReport, queueIfPending, queueListingReview } from '../services/listingReview';
 
 const r = Router();
 const LISTER_ROLES = ['agent', 'landlord', 'estate_manager'] as const;
@@ -52,6 +52,27 @@ const propertyBody = z.object({
   unitMode: z.enum(['single', 'same', 'mixed']).optional(),
   units: z.array(unitBody).max(500).optional(),
 });
+
+/**
+ * A draft (publish: false, or editing an unlisted listing) can be saved with any part of the form filled in.
+ * Everything is checked when it is submitted for review (POST /:id/submit, see draftProblems).
+ */
+const draftBody = propertyBody.extend({
+  title: z.string().trim().max(200).default(''), address: z.string().trim().max(300).default(''),
+  priceKobo: z.number().int().min(0).default(0),
+});
+
+/** What a draft still needs before it can be published. */
+async function draftProblems(p: any) {
+  const { count } = await db.from('property_media').select('id', { count: 'exact', head: true }).eq('property_id', p.id);
+  return [
+    String(p.title ?? '').trim().length >= 3 ? null : 'a title',
+    String(p.address ?? '').trim().length >= 5 ? null : 'the street address',
+    String(p.area ?? '').trim() ? null : 'the area',
+    Number(p.price_kobo) > 0 ? null : 'the price',
+    (count ?? 0) > 0 ? null : 'at least one photo',
+  ].filter(Boolean) as string[];
+}
 
 const row = (b: z.infer<typeof propertyBody>) => ({
   title: b.title, description: b.description, address: b.address, area: b.area, city: b.city, state: b.state,
@@ -248,7 +269,7 @@ r.delete('/:id/save', authenticate, async (req, res) => {
 });
 
 r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (req, res) => {
-  const b = propertyBody.parse(req.body);
+  const b = (req.body?.publish === false ? draftBody : propertyBody).parse(req.body);
   if (b.publish) await assertCanList(req.user);
   if (b.units) assertUniqueLabels(b.units);
   const p = unwrap(await db.from('properties').insert({ ...row(b), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single());
@@ -259,7 +280,7 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
     rentKobo: b.pricePeriod === 'year' ? Math.round(b.priceKobo / 12) : b.priceKobo, sizeSqm: b.sizeSqm ?? null, bathrooms: Math.max(1, b.bathrooms),
   }];
   const created = unwrap(await db.from('units').insert(units.map((u) => ({ ...unitRow(u), property_id: p.id }))).select());
-  if (p.status === 'pending') queueListingReview(p.id); // checked on the server in the background; the lister never sees it
+  if (p.status === 'pending') queueListingReview(p.id); // checked in the background; the lister follows it on GET /:id/review
   res.status(201).json({ property: p, units: created, message: b.publish ? 'Submitted for approval' : 'Property saved' });
 });
 
@@ -348,6 +369,12 @@ r.put('/:id/units', authenticate, requireRole(...LISTER_ROLES), async (req, res)
 });
 
 /** Ownership documents (C of O, survey plan, tenancy agreement). Files are uploaded to the private zone first. */
+/** The automatic review report for the listing's owner (checking / needs changes / waiting for a reviewer / rejected). */
+r.get('/:id/review', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
+  const p = await assertOwner(String(req.params.id), req.user.id);
+  res.json({ report: await ownerListingReport(p) });
+});
+
 r.post('/:id/documents', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   const p = await assertOwner(String(req.params.id), req.user.id);
   const b = z.object({ docType: z.enum(DOC_TYPES), path: z.string().min(3).max(300), originalName: z.string().max(200).optional(), sizeBytes: z.number().int().nonnegative().optional() }).parse(req.body);
@@ -380,7 +407,7 @@ r.post('/:id/resume', authenticate, requireRole(...LISTER_ROLES), async (req, re
 
 r.patch('/:id', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   const existing = await assertOwner(String(req.params.id), req.user.id);
-  const b = propertyBody.partial().omit({ media: true, publish: true }).parse(req.body);
+  const b = (existing.status === 'unlisted' ? draftBody : propertyBody).partial().omit({ media: true, publish: true }).parse(req.body);
   const patch: Record<string, unknown> = Object.fromEntries(Object.entries(row(b as any)).filter(([, v]) => v !== undefined));
   patch.updated_at = new Date().toISOString();
   if (existing.status === 'rejected') { patch.status = 'pending'; patch.rejection_reason = null; } // edit & resubmit
@@ -392,6 +419,8 @@ r.patch('/:id', authenticate, requireRole(...LISTER_ROLES), async (req, res) => 
 r.post('/:id/submit', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (req, res) => {
   const p = await assertOwner(String(req.params.id), req.user.id);
   if (p.status !== 'unlisted') throw badRequest('Only unlisted properties can be submitted');
+  const missing = await draftProblems(p);
+  if (missing.length) throw badRequest(`Finish your listing before publishing: add ${missing.length > 1 ? missing.slice(0, -1).join(', ') + ' and ' + missing.at(-1) : missing[0]}.`, 'DRAFT_INCOMPLETE');
   await assertCanList(req.user);
   await db.from('properties').update({ status: 'pending', updated_at: new Date().toISOString() }).eq('id', p.id);
   queueListingReview(p.id);

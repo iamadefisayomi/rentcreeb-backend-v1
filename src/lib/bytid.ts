@@ -8,6 +8,31 @@ export interface NinSelfieResult {
   firstName?: string;
   lastName?: string;
   raw: unknown;
+  /** The whole provider response for the admin reviewer, with every picture replaced by a placeholder (pictures are in `images`). */
+  response: Record<string, unknown>;
+  /** Pictures found in the response (the NIMC ID photo, a signature …): base64 data or a link, by the field they came from. */
+  images: NimcImage[];
+}
+export type NimcImage = { field: string; base64?: string; url?: string };
+
+const IMAGE_KEY = /photo|image|picture|portrait|face|signature|selfie/i;
+const looksBase64Image = (v: string) => /^data:image\//i.test(v) || (v.length > 800 && /^[A-Za-z0-9+/=\s]+$/.test(v.slice(0, 2000)));
+const looksImageUrl = (v: string) => /^https?:\/\//i.test(v);
+
+/** Copy of the response with pictures taken out (they are stored as files, not as JSON), plus the pictures themselves. */
+export function splitImages(value: unknown, path = ''): { clean: unknown; images: NimcImage[] } {
+  const images: NimcImage[] = [];
+  const walk = (v: unknown, p: string, key: string): unknown => {
+    if (typeof v === 'string') {
+      if (looksBase64Image(v) && (IMAGE_KEY.test(key) || v.length > 5000)) { images.push({ field: p, base64: v.replace(/^data:image\/\w+;base64,/i, '') }); return '[picture: shown above]'; }
+      if (IMAGE_KEY.test(key) && looksImageUrl(v)) { images.push({ field: p, url: v }); return '[picture: shown above]'; }
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x, i) => walk(x, `${p}[${i}]`, key));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, walk(x, p ? `${p}.${k}` : k, k)]));
+    return v;
+  };
+  return { clean: walk(value, path, ''), images };
 }
 
 const authHeaders = () => ({ Authorization: `Bearer ${env.BYTID_API_KEY}` });
@@ -92,12 +117,16 @@ export async function verifyNinWithSelfie(nin: string, selfieBase64: string): Pr
   }
 
   const record = data.data ?? {};
+  // Everything Bytid sent back, for the admin reviewer only (stored privately, deleted with the other ID evidence).
+  const { clean, images } = splitImages(json);
   logger.info({ faceMatch: fm.status, score: fm.score, mode: keyMode(), requestId: json?.request_id }, 'Bytid face match result');
   return {
     match: fm.status === 'matched',
     confidence: Number(fm.score ?? 0),
     firstName: record.first_name,
     lastName: record.last_name,
-    raw: { face_match: fm, request_id: json.request_id }, // never persist the full NIN record
+    raw: { face_match: fm, request_id: json.request_id },
+    response: (clean ?? {}) as Record<string, unknown>,
+    images,
   };
 }

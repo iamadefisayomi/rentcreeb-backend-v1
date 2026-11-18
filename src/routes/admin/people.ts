@@ -3,13 +3,14 @@ import { z } from 'zod';
 import { env } from '../../config/env';
 import { anonClient, db, dbError, unwrapMaybe } from '../../lib/supabase';
 import { badRequest, conflict, notFound } from '../../lib/errors';
-import { deleteFromBunny, signPrivateUrl } from '../../lib/bunny';
+import { signPrivateUrl } from '../../lib/bunny';
 import { normalizePhone, paginate, uuid } from '../../lib/common';
 import { sendEmail } from '../../lib/email';
 import { logger } from '../../lib/logger';
 import { notify } from '../../services/notify';
 import { closeAccount } from '../../services/accounts';
 import { presenceOf } from '../../services/presence';
+import { purgeVerificationEvidence } from '../../services/verificationEvidence';
 import { PERSON, audit, count, decision, like, notesFor, sendCsv } from './shared';
 
 const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'admin'] as const;
@@ -55,13 +56,7 @@ async function updateVerification(id: string, patch: Record<string, unknown>, gu
 
 /** Delete stored selfies / ID photos for a user once a decision is made (privacy: keep evidence only while needed). */
 async function purgeEvidence(userId: string) {
-  const { data, error } = await db.from('verifications').select('id, selfie_path, document_path').eq('user_id', userId).or('selfie_path.not.is.null,document_path.not.is.null');
-  if (error) return;
-  for (const v of data ?? []) {
-    if (v.selfie_path) await deleteFromBunny(v.selfie_path, true);
-    if (v.document_path) await deleteFromBunny(v.document_path, true);
-    await db.from('verifications').update({ selfie_path: null, document_path: null }).eq('id', v.id);
-  }
+  await purgeVerificationEvidence((q) => q.eq('user_id', userId));
 }
 
 async function emailUser(userId: string, subject: string, text: string) {
@@ -151,7 +146,7 @@ export function mountPeople(r: Router) {
     const failedCounting = (verifs.data ?? []).filter((v: any) => v.status === 'failed' && v.counts_as_attempt !== false).length;
     res.json({
       user: safe, artisan: artisan.data ?? null,
-      verifications: (verifs.data ?? []).map((v: any) => ({ ...v, nin_hash: undefined, hasSelfie: !!v.selfie_path, hasDocument: !!v.document_path, selfie_path: undefined, document_path: undefined })),
+      verifications: (verifs.data ?? []).map((v: any) => ({ ...v, nin_hash: undefined, hasSelfie: !!v.selfie_path, hasDocument: !!v.document_path || (Array.isArray(v.nimc_files) && v.nimc_files.length > 0), selfie_path: undefined, document_path: undefined, nimc_files: undefined, nimc_record: undefined })),
       attempts: { used: failedCounting, max: env.NIN_MAX_ATTEMPTS },
       auth: au ? { email: au.email, emailConfirmed: !!au.email_confirmed_at, lastSignInAt: au.last_sign_in_at, bannedUntil: au.banned_until ?? null, providers: au.app_metadata?.providers ?? [] } : null,
       presence: presenceOf(id), pushEnabled: !!expo_push_token,
@@ -303,8 +298,15 @@ export function mountPeople(r: Router) {
     }
     if (error) throw dbError(error);
     const [review, failed, success] = await Promise.all(['manual_review', 'failed', 'success'].map((s) => count('verifications', (x) => x.eq('status', s))));
+    // Which rows kept the NIN response / NIMC ID photo (migration 017; quietly skipped before it is applied).
+    const ids = (data ?? []).map((v: any) => v.id);
+    const nimc = new Map<string, { photo: boolean; response: boolean }>();
+    if (ids.length) {
+      const { data: n } = await db.from('verifications').select('id, nimc_files, nimc_record').in('id', ids);
+      for (const x of (n ?? []) as any[]) nimc.set(x.id, { photo: Array.isArray(x.nimc_files) && x.nimc_files.length > 0, response: !!x.nimc_record });
+    }
     res.json({
-      verifications: (data ?? []).map((v: any) => ({ ...v, hasSelfie: !!v.selfie_path, hasDocument: !!v.document_path, selfie_path: undefined, document_path: undefined })),
+      verifications: (data ?? []).map((v: any) => ({ ...v, hasSelfie: !!v.selfie_path, hasDocument: !!v.document_path, hasNimcPhoto: !!nimc.get(v.id)?.photo, hasNimcResponse: !!nimc.get(v.id)?.response, selfie_path: undefined, document_path: undefined })),
       total: total ?? 0, counts: { manual_review: review, failed, success },
     });
   });
@@ -321,10 +323,16 @@ export function mountPeople(r: Router) {
         : db.from('verifications').select(`user_id, created_at, user:profiles!verifications_user_id_fkey(id, first_name, last_name)`).eq('nin_hash', v.nin_hash).neq('user_id', v.user_id).limit(5),
     ]);
     const sign = (p?: string | null) => { if (!p) return null; try { return signPrivateUrl(p, 600); } catch { return null; } };
-    const evidence = { selfieUrl: sign(v.selfie_path), documentUrl: sign(v.document_path), documentType: v.document_type ?? null, documentIsPdf: /\.pdf$/i.test(v.document_path ?? '') };
-    if (v.selfie_path || v.document_path) await audit(req, 'verification.view_evidence', 'verification', id, { userId: v.user_id });
+    const nimcFiles: any[] = Array.isArray(v.nimc_files) ? v.nimc_files : [];
+    const evidence = {
+      selfieUrl: sign(v.selfie_path), documentUrl: sign(v.document_path), documentType: v.document_type ?? null, documentIsPdf: /\.pdf$/i.test(v.document_path ?? ''),
+      // Pictures that came back with the NIN check (the NIMC ID photo first), and every other field of the response.
+      nimcImages: nimcFiles.map((f) => ({ field: String(f.field ?? ''), url: sign(f.path) })).filter((f) => f.url),
+      nimcResponse: v.nimc_record ?? null,
+    };
+    if (v.selfie_path || v.document_path || nimcFiles.length || v.nimc_record) await audit(req, 'verification.view_evidence', 'verification', id, { userId: v.user_id });
     const used = (history ?? []).filter((h: any) => h.status === 'failed' && h.counts_as_attempt !== false).length;
-    const { nin_hash: _h, selfie_path: _s, document_path: _d, ...safe } = v as any;
+    const { nin_hash: _h, selfie_path: _s, document_path: _d, nimc_files: _nf, nimc_record: _nr, ...safe } = v as any;
     res.json({ verification: safe, user, history: history ?? [], evidence, sameNinOtherAccounts: (dup as any).data ?? [], attempts: { used, max: env.NIN_MAX_ATTEMPTS } });
   });
 
