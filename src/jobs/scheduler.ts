@@ -56,8 +56,8 @@ export function startScheduler() {
       }
     } catch (err) { logger.error({ err }, 'cron: lease terminations failed'); }
 
-    // ID evidence (selfies, ID photos, the NIN response and NIMC pictures) kept for admin review is deleted 30 days
-    // after the check, unless it is still being reviewed.
+    // Selfies and uploaded ID documents kept for admin review are deleted 30 days after the check, unless still being
+    // reviewed. The NIMC card and NIN response are kept (see purgeVerificationEvidence).
     try {
       const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
       await purgeVerificationEvidence((q) => q.neq('status', 'manual_review').lt('created_at', cutoff));

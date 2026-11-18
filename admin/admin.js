@@ -412,7 +412,7 @@
         section('Evidence', '<div class="evidence">' + fig(e.selfieUrl, 'Selfie', v.confidence != null ? 'face score ' + Math.round(v.confidence) + '%' : '') +
           nimcImgs.map(function (x, i) { return fig(x.url, i === 0 && !/signature/i.test(x.field) ? 'NIMC ID photo' : /signature/i.test(x.field) ? 'NIMC signature' : 'NIMC picture', 'from the NIN check · ' + x.field); }).join('') +
           (e.documentUrl || !nimcImgs.length ? fig(e.documentUrl, DOC[e.documentType] || 'ID document', '', e.documentIsPdf) : '') +
-          (safeUrl(u.avatar_url) ? fig(u.avatar_url, 'Profile photo', 'on the account') : '') + '</div><div class="faint">Photos open full size in a new tab. Links expire after 10 minutes; they are deleted once you decide.</div>') +
+          (safeUrl(u.avatar_url) ? fig(u.avatar_url, 'Profile photo', 'on the account') : '') + '</div><div class="faint">Photos open full size in a new tab. Links expire after 10 minutes. The selfie is deleted once you decide; the NIMC card and NIN response are kept on file.</div>') +
         '<div class="stack">' + section('Does it match the account?',
           '<div class="compare"><div><div class="label">Name on the account</div><div class="value">' + name(u) + '</div></div><div><div class="label">Name on the NIMC record</div><div class="value">' + (meta.nimc_name ? esc(meta.nimc_name) : '<span class="faint">not available</span>') + '</div></div></div>' +
           '<div class="row">' + matchBadge + reasonBadge(v) + statusBadge(v.status) + '</div>' +

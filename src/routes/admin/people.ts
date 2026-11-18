@@ -54,7 +54,7 @@ async function updateVerification(id: string, patch: Record<string, unknown>, gu
   return r.data as any;
 }
 
-/** Delete stored selfies / ID photos for a user once a decision is made (privacy: keep evidence only while needed). */
+/** Delete the selfies / uploaded ID documents for a user once a decision is made. The NIMC card and NIN response stay. */
 async function purgeEvidence(userId: string) {
   await purgeVerificationEvidence((q) => q.eq('user_id', userId));
 }

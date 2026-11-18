@@ -83,7 +83,8 @@ r.get('/status', async (req, res) => {
 
 /**
  * multipart/form-data: nin, consent, selfie (image). The selfie is forwarded to Bytid. The selfie, the full response and the
- * NIMC ID photo are kept privately for the admin ID review page, and deleted once an admin decides or after 30 days.
+ * NIMC ID photo are kept privately for the admin ID verification page. The selfie is deleted once an admin decides or
+ * after 30 days; the NIMC card and the NIN response are kept for every outcome (success, review or failure).
  */
 r.post('/nin', upload.single('selfie'), async (req, res) => {
   const { nin, consent } = z.object({ nin: z.string().regex(/^\d{11}$/, 'NIN must be 11 digits'), consent: boolish }).parse(req.body);
@@ -105,8 +106,8 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
     // The NIMC name is kept so a reviewer can compare it with the name on the account (no other NIN data is stored).
     const meta = { face_match: (result.raw as any)?.face_match?.status, request_id: (result.raw as any)?.request_id,
       nimc_name: [result.firstName, result.lastName].filter(Boolean).join(' ') || undefined };
-    // Evidence for the admin page: the selfie, the full NIN response and the NIMC ID photo. Private; deleted once an
-    // admin decides or after 30 days (scheduler).
+    // Evidence for the admin page: the selfie, the full NIN response and the NIMC ID card/photo, saved on every outcome.
+    // Private. The NIMC card and response are kept; only the selfie is cleared later (admin decision / 30 days).
     const [selfie_path, nimc_files] = await Promise.all([keepForReview(req.user.id, req.file, 'selfie'), keepNimcImages(req.user.id, result.images)]);
     const evidence = { selfie_path, nimc_record: result.response, nimc_files };
     if (!result.match || result.confidence < env.BYTID_MIN_CONFIDENCE) {
