@@ -156,22 +156,90 @@
     ['Platform', [['announcements', 'Announcements'], ['audit', 'Audit log']]],
   ];
   var ALL_NAV = []; NAV.forEach(function (g) { ALL_NAV = ALL_NAV.concat(g[1]); });
+  // Line icons (24×24, stroke) for the sidebar and controls.
+  var ICON_PATHS = {
+    overview: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z',
+    system: 'M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6',
+    verifications: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4',
+    listings: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z',
+    artisans: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z',
+    reports: 'M4 22V4M4 4h12l-2 4 2 4H4',
+    reviews: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z',
+    support: 'M3 14v-2a9 9 0 0 1 18 0v2M21 14v3a2 2 0 0 1-2 2h-1v-6h3zM3 14v3a2 2 0 0 0 2 2h1v-6H3z',
+    feedback: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12zM8.5 13.5s1.2 1.5 3.5 1.5 3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01',
+    users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',
+    finance: 'M3 3v18h18M7 15v2M11 11v6M15 7v10M19 12v5',
+    payments: 'M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zM2 10h20M6 15h4',
+    bookings: 'M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM16 2v4M8 2v4M3 10h18',
+    escrow: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4',
+    withdrawals: 'M12 19V5M5 12l7-7 7 7M5 21h14',
+    subscriptions: 'M12 2 2 7l10 5 10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+    tenancies: 'M7.5 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM11 12h10M18 12v3M21 12v2',
+    jobs: 'M3 8a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 6V4h6v2M3 13h18',
+    rentsave: 'M5 6a7 3 0 1 0 14 0a7 3 0 1 0-14 0M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6',
+    mailing: 'M3 5h18v14H3zM3 6l9 7 9-7',
+    'mail-campaigns': 'M22 2 11 13M22 2l-7 20-4-9-9-4z',
+    'mail-automations': 'M13 2 3 14h9l-1 8 10-12h-9z',
+    'mail-contacts': 'M4 4a2 2 0 0 1 2-2h12v20H6a2 2 0 0 1-2-2zM12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8 17a4 4 0 0 1 8 0',
+    'mail-lists': 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+    'mail-templates': 'M3 3h18v18H3zM3 9h18M9 21V9',
+    announcements: 'M3 11v2a1 1 0 0 0 1 1h3l7 5V5L7 10H4a1 1 0 0 0-1 1zM18 8a5 5 0 0 1 0 8',
+    audit: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2',
+    search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
+    light: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+    dark: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
+    auto: 'M2 4h20v13H2zM8 21h8M12 17v4',
+    logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
+    menu: 'M3 6h18M3 12h18M3 18h18',
+    check: 'M20 6 9 17l-5-5',
+  };
+  function icon(k, cls) {
+    return '<svg class="' + (cls || 'ico') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + (ICON_PATHS[k] || ICON_PATHS.overview) + '"/></svg>';
+  }
+
+  // Theme: follows the OS unless the admin picks light or dark (remembered in this browser).
+  var THEME_KEY = 'rc_admin_theme';
+  var THEMES = { auto: 'System', light: 'Light', dark: 'Dark' };
+  function getTheme() { try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { return 'auto'; } }
+  function applyTheme(t) {
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme');
+    try { t === 'auto' ? localStorage.removeItem(THEME_KEY) : localStorage.setItem(THEME_KEY, t); } catch (e) {}
+  }
+  applyTheme(getTheme());
+
+  // "/" jumps to search from anywhere (except while typing).
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target; if (t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName))) return;
+    var s = document.querySelector('#gsearch input'); if (s) { e.preventDefault(); s.focus(); s.select(); }
+  });
+
   function shell(section, title, sub, actions) {
+    var group = '';
     var nav = NAV.map(function (g) {
       return '<div class="nav-group">' + esc(g[0]) + '</div>' + g[1].map(function (n) {
+        if (section === n[0]) group = g[0];
         var c = n[2] && counts[n[2]] ? '<span class="badge">' + counts[n[2]] + '</span>' : '';
-        return '<a class="nav' + (section === n[0] ? ' on' : '') + '" href="#/' + n[0] + '">' + esc(n[1]) + c + '</a>';
+        return '<a class="nav' + (section === n[0] ? ' on' : '') + '" href="#/' + n[0] + '"' + (section === n[0] ? ' aria-current="page"' : '') + '>' + icon(n[0]) + '<span class="txt">' + esc(n[1]) + '</span>' + c + '</a>';
       }).join('');
     }).join('');
-    $('#app').innerHTML = '<div class="shell"><aside class="side" id="side"><div class="brand"><img src="logo-white.svg" alt="RentCreeb" height="22"> <span>Admin</span></div>' + nav +
-      '<div class="side-foot"><div>Signed in as<br><b style="color:#fff">' + name(me) + '</b></div><button id="logout">Sign out</button></div></aside>' +
-      '<main class="main"><div class="head"><div><div class="row"><button class="btn sm menu-btn" id="menu">☰ Menu</button><h1>' + esc(title) + '</h1></div>' +
+    var theme = getTheme();
+    $('#app').innerHTML = '<div class="shell"><aside class="side" id="side" aria-label="Sections"><div class="brand"><img src="logo-white.svg" alt="RentCreeb" height="22"> <span>Admin</span></div>' + nav +
+      '<div class="side-foot"><div class="side-user">' + avatar(me) + '<div style="min-width:0"><b>' + name(me) + '</b><small>Administrator</small></div></div>' +
+      '<div class="side-actions"><button id="theme" title="Theme: ' + THEMES[theme] + ' (click to change)">' + icon(theme, '') + THEMES[theme] + '</button><button id="logout">' + icon('logout', '') + 'Sign out</button></div></div></aside>' +
+      '<div class="side-scrim" id="scrim"></div>' +
+      '<main class="main"><div class="head"><div>' + (group ? '<div class="crumb">' + esc(group) + '</div>' : '') +
+      '<div class="row"><button class="btn sm menu-btn" id="menu" aria-label="Open menu">' + icon('menu', '') + '</button><h1>' + esc(title) + '</h1></div>' +
       (sub ? '<p>' + esc(sub) + '</p>' : '') + '</div><div class="row">' + (actions || '') +
-      '<form class="head-search" id="gsearch"><input class="input" name="q" placeholder="Search people, listings, references…" aria-label="Search"></form></div></div>' +
-      (counts.maintenanceMode ? '<div class="alert bad" style="margin-bottom:14px">Maintenance mode is ON: the app is blocked for everyone except admins. <a href="#/system">Turn it off</a></div>' : '') +
-      '<div id="view"><div class="spinner">Loading…</div></div></main></div>';
+      '<form class="head-search" id="gsearch" role="search">' + icon('search', '') + '<input class="input" name="q" placeholder="Search people, listings, references…" aria-label="Search"><kbd>/</kbd></form></div></div>' +
+      (counts.maintenanceMode ? '<div class="alert bad" style="margin-bottom:16px"><b>Maintenance mode is ON.</b> The app is blocked for everyone except admins. <a href="#/system">Turn it off</a></div>' : '') +
+      '<div id="view"><div class="spinner" role="status" aria-label="Loading">Loading…</div></div></main></div>';
     $('#logout').onclick = function () { api('/auth/logout', { method: 'POST' }).catch(function () {}); logout(); };
+    $('#theme').onclick = function () { var order = ['auto', 'light', 'dark']; applyTheme(order[(order.indexOf(getTheme()) + 1) % 3]); var b = $('#theme'); var t = getTheme(); b.innerHTML = icon(t, '') + THEMES[t]; b.title = 'Theme: ' + THEMES[t] + ' (click to change)'; };
+    var closeSide = function () { $('#side').classList.remove('open'); };
     $('#menu').onclick = function () { $('#side').classList.toggle('open'); };
+    $('#scrim').onclick = closeSide;
+    $$('.side .nav').forEach(function (a) { a.addEventListener('click', closeSide); });
     $('#gsearch').onsubmit = function (e) { e.preventDefault(); var q = e.target.q.value.trim(); if (q.length >= 2) location.hash = '#/search' + qs({ q: q }); };
     return $('#view');
   }
@@ -207,13 +275,18 @@
   function chart(series, fmt) {
     if (!series || !series.length) return '';
     var max = Math.max.apply(null, series.map(function (d) { return d.value; }).concat([1]));
-    var w = 600, h = 110, gap = 2, bw = (w - gap * series.length) / series.length;
+    var w = 600, h = 100, gap = 3, bw = (w - gap * (series.length - 1)) / series.length;
+    var total = series.reduce(function (t, d) { return t + d.value; }, 0);
+    var f = function (v) { return fmt ? fmt(v) : Number(v).toLocaleString('en-NG'); };
+    var dayLabel = function (d) { return new Date(d + 'T12:00:00').toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }); };
+    var grid = [0.25, 0.5, 0.75].map(function (p) { return '<line x1="0" x2="' + w + '" y1="' + (h * p).toFixed(1) + '" y2="' + (h * p).toFixed(1) + '" class="gridline"/>'; }).join('');
     var bars = series.map(function (d, i) {
-      var bh = Math.max(d.value ? 2 : 0, Math.round((d.value / max) * (h - 18)));
-      return '<rect class="bar" x="' + (i * (bw + gap)).toFixed(1) + '" y="' + (h - 14 - bh) + '" width="' + bw.toFixed(1) + '" height="' + bh + '" rx="2"><title>' + esc(d.day + ': ' + (fmt ? fmt(d.value) : d.value)) + '</title></rect>';
+      var bh = Math.max(d.value ? 3 : 0, Math.round((d.value / max) * (h - 4)));
+      return '<rect class="bar" x="' + (i * (bw + gap)).toFixed(1) + '" y="' + (h - bh) + '" width="' + bw.toFixed(1) + '" height="' + bh + '" rx="2"><title>' + esc(dayLabel(d.day) + ': ' + f(d.value)) + '</title></rect>';
     }).join('');
-    return '<svg class="chart" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" role="img" aria-label="Daily chart">' + bars +
-      '<text x="0" y="' + (h - 2) + '">' + esc(series[0].day.slice(5)) + '</text><text x="' + w + '" y="' + (h - 2) + '" text-anchor="end">' + esc(series[series.length - 1].day.slice(5)) + '</text></svg>';
+    return '<div class="chart-box"><div class="chart-sum"><b>' + esc(f(total)) + '</b><span>total \u00b7 peak ' + esc(f(max === 1 && !total ? 0 : max)) + '/day</span></div>' +
+      '<svg class="chart" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" role="img" aria-label="Daily chart, total ' + esc(f(total)) + '">' + grid + '<line x1="0" x2="' + w + '" y1="' + h + '" y2="' + h + '" class="axis"/>' + bars + '</svg>' +
+      '<div class="chart-axis"><span>' + esc(dayLabel(series[0].day)) + '</span><span>' + esc(dayLabel(series[series.length - 1].day)) + '</span></div></div>';
   }
 
   // Internal notes
@@ -276,11 +349,16 @@
 
   // ───────── login ─────────
   function renderLogin(msg) {
-    $('#app').innerHTML = '<div class="login"><form class="card" id="login"><div><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo"><h1 style="margin-top:14px">Admin sign-in</h1><p class="muted" style="margin:6px 0 0">Sign in with your admin account.</p></div>' +
+    var point = function (t) { return '<li>' + icon('check', '') + esc(t) + '</li>'; };
+    $('#app').innerHTML = '<div class="login"><section class="login-art" aria-hidden="true"><img src="logo-white.svg" alt="" height="26" style="position:relative;z-index:1">' +
+      '<div><h2>Run RentCreeb from one place.</h2><p>Review listings and ID checks, answer support, move money safely and talk to your users.</p>' +
+      '<ul>' + point('Review queues with everything you need to decide') + point('Support conversations in real time') + point('Finance, escrow and payouts at a glance') + point('Campaigns, automations and mailing lists') + '</ul></div>' +
+      '<div class="foot">Admins only · every action is recorded in the audit log</div></section>' +
+      '<div class="login-pane"><form class="card" id="login"><div><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo"><h1 style="margin-top:18px">Welcome back</h1><p class="muted" style="margin:6px 0 0">Sign in with your admin account.</p></div>' +
       (msg ? '<div class="err">' + esc(msg) + '</div>' : '') +
-      '<label>Email<input class="input" name="email" type="email" autocomplete="username" required></label>' +
+      '<label>Email<input class="input" name="email" type="email" autocomplete="username" placeholder="you@rentcreeb.com" required></label>' +
       '<label>Password<input class="input" name="password" type="password" autocomplete="current-password" required></label>' +
-      '<button class="btn primary" type="submit">Sign in</button></form></div>';
+      '<button class="btn primary" type="submit">Sign in</button></form></div></div>';
     $('#login').onsubmit = function (e) {
       e.preventDefault();
       var f = e.target; var btn = f.querySelector('button'); btn.disabled = true; btn.textContent = 'Signing in…';
@@ -298,8 +376,9 @@
     refreshCounts().then(function (o) {
       shell('overview', 'Overview', 'What needs attention right now.');
       var q = o.queues, u = o.users, a = o.activity;
-      var card = function (n, l, href, hot) { return '<a class="card stat' + (hot && n ? ' hot' : '') + '" href="' + href + '"><span class="n">' + n + '</span><span class="l">' + esc(l) + '</span></a>'; };
-      var plain = function (n, l) { return '<div class="card stat"><span class="n">' + n + '</span><span class="l">' + esc(l) + '</span></div>'; };
+      var fmtN = function (n) { return typeof n === 'number' ? n.toLocaleString('en-NG') : n; };
+      var card = function (n, l, href, hot) { return '<a class="card stat' + (hot && n ? ' hot' : '') + '" href="' + href + '"><span class="n">' + fmtN(n) + '</span><span class="l">' + esc(l) + '</span></a>'; };
+      var plain = function (n, l) { return '<div class="card stat"><span class="n">' + fmtN(n) + '</span><span class="l">' + esc(l) + '</span></div>'; };
       var banner = o.settings && o.settings.banner ? '<div class="alert info" style="margin-bottom:14px">App banner showing: “' + esc(o.settings.banner.message) + '” · <a href="#/system">edit</a></div>' : '';
       view(banner + '<h2 class="section-title">Queues</h2><div class="grid cols-4">' +
         card(q.manualVerifications, 'ID checks needing review', '#/verifications', 1) + card(q.pendingProperties, 'Listings awaiting approval', '#/listings', 1) +
