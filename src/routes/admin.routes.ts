@@ -5,6 +5,7 @@ import { mountPeople } from './admin/people';
 import { mountContent } from './admin/content';
 import { mountMoney } from './admin/money';
 import { mountMailing } from './admin/mailing';
+import { mountAssistant } from './admin/assistant';
 
 /**
  * Admin API, used by the web dashboard served at /admin (backend/admin).
@@ -25,5 +26,6 @@ mountPeople(r);
 mountContent(r);
 mountMoney(r);
 mountMailing(r);
+mountAssistant(r);
 
 export default r;

@@ -113,6 +113,8 @@ export function mountPlatform(r: Router) {
           ['014 listing AI review', probe('properties', 'ai_review')],
           ['018 support chat', probe('support_tickets', 'conversation_id')],
           ['018 mailing list', probe('mailing_contacts')],
+          ['019 listing video links', probe('properties', 'video_urls')],
+          ['020 assistant & live agents', probe('assistant_conversations')],
         ];
         return Promise.all(checks.map(async ([name, p]) => ({ name, applied: await p })));
       })(),

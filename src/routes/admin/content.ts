@@ -220,12 +220,14 @@ export function mountContent(r: Router) {
   // ───────── Support tickets ─────────
   r.get('/tickets', async (req, res) => {
     const { from, to } = paginate(req.query);
-    const f = z.object({ status: z.string().optional(), kind: z.string().optional(), q: z.string().optional(), awaiting: z.enum(['staff', 'user']).optional() }).parse(req.query);
+    const f = z.object({ status: z.string().optional(), kind: z.string().optional(), q: z.string().optional(), awaiting: z.enum(['staff', 'user']).optional(), assigned: z.enum(['me', 'none']).optional() }).parse(req.query);
     // Newest activity first, so a user's reply brings their ticket back to the top.
-    let q = db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON})`, { count: 'exact' })
+    let q = db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON}), assignee:profiles!support_tickets_assigned_to_fkey(id, first_name, last_name)`, { count: 'exact' })
       .order('last_message_at', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).range(from, to);
     if (f.status) q = q.eq('status', f.status);
     if (f.awaiting) q = q.eq('awaiting', f.awaiting);
+    if (f.assigned === 'me') q = q.eq('assigned_to', req.user.id).in('status', ['open', 'in_progress']);
+    if (f.assigned === 'none') q = q.is('assigned_to', null).in('status', ['open', 'in_progress']);
     if (f.kind) q = q.eq('kind', f.kind);
     if (f.q?.trim()) { const t = like(f.q); q = q.or(`subject.ilike.${t},message.ilike.${t}`); }
     const { data, count: total, error } = await q;
@@ -235,7 +237,7 @@ export function mountContent(r: Router) {
   /** One ticket with its chat thread (support threads are part of the job, so opening one is not audited like private chats). */
   r.get('/tickets/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);
-    const t = unwrapMaybe(await db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON}, created_at, is_suspended)`).eq('id', id).maybeSingle());
+    const t = unwrapMaybe(await db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON}, created_at, is_suspended), assignee:profiles!support_tickets_assigned_to_fkey(id, first_name, last_name)`).eq('id', id).maybeSingle());
     if (!t) throw notFound('Ticket not found');
     const conversationId = await ensureTicketConversation(t as Ticket);
     const [{ data: msgs, error }, { data: conv }, others, notes] = await Promise.all([

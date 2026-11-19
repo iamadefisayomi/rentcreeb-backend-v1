@@ -430,3 +430,13 @@ iframe.preview.tall { height: 70vh; }
 .vthumb .play { width: 44px; height: 44px; border-radius: 50%; background: rgba(0, 0, 0, .62); color: #fff; display: grid; place-items: center; font-size: 15px; padding-left: 3px; }
 .vmeta { padding: 9px 12px; display: grid; gap: 2px; min-width: 0; }
 .vmeta b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Live-chat availability switch (sidebar) */
+.avail { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--radius-xs); border: 1px solid rgba(255, 255, 255, .08); background: rgba(255, 255, 255, .05); color: rgba(255, 255, 255, .78); cursor: pointer; font-size: 12.5px; font-weight: 500; text-align: left; }
+.avail:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.avail .sw { width: 30px; height: 17px; border-radius: 99px; background: rgba(255, 255, 255, .22); position: relative; flex: none; transition: background .15s; }
+.avail .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.avail.on { color: #fff; border-color: rgba(74, 222, 128, .35); }
+.avail.on .sw { background: #22c55e; }
+.avail.on .sw::after { transform: translateX(13px); }
+.nav .badge.mine { background: #22c55e; }

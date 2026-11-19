@@ -7,6 +7,7 @@
   var session = load();
   var me = null;
   var counts = {};
+  var agent = { available: false, known: false, seen: {} }; // live-chat availability + chats already announced
 
   // ───────── helpers ─────────
   function load() { try { return JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch (e) { return null; } }
@@ -196,7 +197,7 @@
     ['Money', [['finance', 'Finance'], ['payments', 'Payments', 'stuckPayments'], ['bookings', 'Bookings'], ['escrow', 'Escrow'], ['withdrawals', 'Withdrawals', 'pendingWithdrawals'], ['subscriptions', 'Subscriptions & plans']]],
     ['Operations', [['tenancies', 'Tenancies'], ['jobs', 'Jobs'], ['rentsave', 'RentSave']]],
     ['Mailing', [['mailing', 'Overview'], ['mail-campaigns', 'Campaigns'], ['mail-automations', 'Automations'], ['mail-contacts', 'Contacts'], ['mail-lists', 'Lists & sign-up form'], ['mail-templates', 'Templates']]],
-    ['Platform', [['announcements', 'Announcements'], ['audit', 'Audit log']]],
+    ['Platform', [['assistant', 'AI Assistant'], ['announcements', 'Announcements'], ['audit', 'Audit log']]],
   ];
   var ALL_NAV = []; NAV.forEach(function (g) { ALL_NAV = ALL_NAV.concat(g[1]); });
   // Line icons (24×24, stroke) for the sidebar and controls.
@@ -228,6 +229,7 @@
     'mail-templates': 'M3 3h18v18H3zM3 9h18M9 21V9',
     announcements: 'M3 11v2a1 1 0 0 0 1 1h3l7 5V5L7 10H4a1 1 0 0 0-1 1zM18 8a5 5 0 0 1 0 8',
     audit: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2',
+    assistant: 'M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9zM5 3l.6 1.4L7 5l-1.4.6L5 7l-.6-1.4L3 5l1.4-.6z',
     search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
     light: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
     dark: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
@@ -269,6 +271,7 @@
     var theme = getTheme();
     $('#app').innerHTML = '<div class="shell"><aside class="side" id="side" aria-label="Sections"><div class="brand"><img src="logo-white.svg" alt="RentCreeb" height="22"> <span>Admin</span></div>' + nav +
       '<div class="side-foot"><div class="side-user">' + avatar(me) + '<div style="min-width:0"><b>' + name(me) + '</b><small>Administrator</small></div></div>' +
+      '<button id="avail" class="avail' + (agent.available ? ' on' : '') + '" title="When on, chats handed over by the AI Assistant can be assigned to you"><span class="sw"></span><span>' + (agent.available ? 'Available for live chats' : 'Away from live chats') + '</span></button>' +
       '<div class="side-actions"><button id="theme" title="Theme: ' + THEMES[theme] + ' (click to change)">' + icon(theme, '') + THEMES[theme] + '</button><button id="logout">' + icon('logout', '') + 'Sign out</button></div></div></aside>' +
       '<div class="side-scrim" id="scrim"></div>' +
       '<main class="main"><div class="head"><div>' + (group ? '<div class="crumb">' + esc(group) + '</div>' : '') +
@@ -277,7 +280,8 @@
       '<form class="head-search" id="gsearch" role="search">' + icon('search', '') + '<input class="input" name="q" placeholder="Search people, listings, references…" aria-label="Search"><kbd>/</kbd></form></div></div>' +
       (counts.maintenanceMode ? '<div class="alert bad" style="margin-bottom:16px"><b>Maintenance mode is ON.</b> The app is blocked for everyone except admins. <a href="#/system">Turn it off</a></div>' : '') +
       '<div id="view"><div class="spinner" role="status" aria-label="Loading">Loading…</div></div></main></div>';
-    $('#logout').onclick = function () { api('/auth/logout', { method: 'POST' }).catch(function () {}); logout(); };
+    $('#logout').onclick = function () { setAvailable(false, true); api('/auth/logout', { method: 'POST' }).catch(function () {}); logout(); };
+    $('#avail').onclick = function () { setAvailable(!agent.available); };
     $('#theme').onclick = function () { var order = ['auto', 'light', 'dark']; applyTheme(order[(order.indexOf(getTheme()) + 1) % 3]); var b = $('#theme'); var t = getTheme(); b.innerHTML = icon(t, '') + THEMES[t]; b.title = 'Theme: ' + THEMES[t] + ' (click to change)'; };
     var closeSide = function () { $('#side').classList.remove('open'); };
     $('#menu').onclick = function () { $('#side').classList.toggle('open'); };
@@ -832,15 +836,15 @@
     shell('support', 'Support', 'Requests, bug reports and data requests. Each one is a conversation in the user’s Messages.');
     var filt = '<form class="row" id="tfilter" style="margin-bottom:12px"><input class="input" name="q" placeholder="Search subject or message" value="' + esc(r.q.q || '') + '"><select class="input" name="kind"><option value="">All kinds</option>' +
       [['support', 'Support'], ['bug', 'Bug reports'], ['data_request', 'Data requests']].map(function (x) { return '<option value="' + x[0] + '"' + (r.q.kind === x[0] ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select><button class="btn">Filter</button></form>';
-    var query = tab === 'awaiting' ? { awaiting: 'staff' } : tab === 'all' ? {} : { status: tab };
+    var query = tab === 'awaiting' ? { awaiting: 'staff' } : tab === 'mine' ? { assigned: 'me' } : tab === 'unassigned' ? { assigned: 'none' } : tab === 'all' ? {} : { status: tab };
     api('/admin/tickets' + qs(Object.assign(query, { kind: r.q.kind, q: r.q.q, page: page, limit: PAGE }))).then(function (j) {
       var list = j.tickets || [];
-      view(tabs([['awaiting', 'Needs a reply'], ['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']], tab, function (t) { return '/support' + qs({ tab: t, kind: r.q.kind }); }) + filt +
+      view(tabs([['awaiting', 'Needs a reply'], ['mine', 'Assigned to me'], ['unassigned', 'Unassigned'], ['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']], tab, function (t) { return '/support' + qs({ tab: t, kind: r.q.kind }); }) + filt +
         (list.length ? '<div class="card">' + table(['', 'Request', 'From', 'Status', 'Last activity'], list, function (t) {
           var k = KIND[t.kind] || [t.kind, ''];
           return '<tr class="click" data-go="#/support/' + esc(t.id) + '"><td>' + (t.awaiting === 'staff' ? '<span class="dot hot" title="Waiting for support"></span>' : '<span class="dot"></span>') + '</td>' +
             '<td><div class="row" style="gap:6px">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity, t.severity === 'high' ? 'bad' : 'grey') : '') + '<b>' + esc(t.subject) + '</b></div><div class="faint clamp">' + esc(t.admin_note && t.awaiting === 'user' ? 'You: ' + t.admin_note : t.message) + '</div></td>' +
-            '<td>' + name(t.user) + '<div class="faint">' + esc(t.category) + '</div></td><td>' + statusBadge(t.status) + (t.awaiting === 'user' ? '<div class="faint">waiting for user</div>' : '') + '</td><td class="num">' + ago(t.last_message_at || t.created_at) + '</td></tr>';
+            '<td>' + name(t.user) + '<div class="faint">' + esc(t.category) + (t.assignee ? ' \u00b7 ' + (t.assignee.id === me.id ? 'you' : esc(t.assignee.first_name || 'agent')) : '') + '</div></td><td>' + statusBadge(t.status) + (t.awaiting === 'user' ? '<div class="faint">waiting for user</div>' : '') + '</td><td class="num">' + ago(t.last_message_at || t.created_at) + '</td></tr>';
         }) + '</div>' : '<div class="card empty">' + (tab === 'awaiting' ? 'All caught up: nobody is waiting for a reply.' : 'No tickets here.') + '</div>') + pager(page, j.total, r.raw));
       $('#tfilter').onsubmit = function (e) { e.preventDefault(); location.hash = '#/support' + qs({ tab: tab, q: e.target.q.value.trim(), kind: e.target.kind.value }); };
       bindGo();
@@ -885,16 +889,22 @@
           '<div class="msgs thread" id="thread">' + (thread || '<div class="empty">No messages yet.</div>') + '</div>' + composer + '</div>' +
           '<div class="stack">' + section('Person', '<div class="row">' + avatar(u) + '<div>' + userLink(u) + '<div class="faint">' + label(u.role) + (u.is_suspended ? ' · suspended' : '') + '</div></div></div>' +
             kv([['Email', esc(u.email || '')], ['Phone', esc(u.phone || '')], ['Member since', day(u.created_at)]])) +
+          section('Assigned to', '<div class="row between"><span>' + (t.assignee ? (t.assignee.id === me.id ? '<b>You</b>' : name(t.assignee)) : '<span class="faint">Nobody yet</span>') + '</span>' +
+            (t.assignee && t.assignee.id === me.id ? '<button class="btn sm" id="t-unassign">Unassign</button>' : '<button class="btn sm primary" id="t-take">Take this chat</button>') + '</div>' +
+            (t.meta && t.meta.assistantConversationId ? '<button class="btn sm" id="t-transcript">\u2728 View AI Assistant chat</button><div class="faint">The user started with the AI Assistant' + (t.meta.reason ? ': \u201c' + esc(t.meta.reason) + '\u201d' : '') + '</div>' : '')) +
           section('Status', '<div class="row">' + STATUS.map(function (s) { return '<button class="btn sm' + (t.status === s[0] ? ' primary' : '') + '" data-st="' + s[0] + '"' + (t.status === s[0] ? ' disabled' : '') + '>' + s[1] + '</button>'; }).join('') + '</div>' +
             '<div class="faint">Resolved keeps the chat open (a reply from the user re-opens the ticket). Closed locks the chat until you reopen it.</div>' +
             kv([['Category', esc(t.category)], ['Opened', when(t.created_at)], ['Closed', t.closed_at ? when(t.closed_at) : '']])) +
-          (t.meta && Object.keys(t.meta).length ? section('Device', kv(Object.keys(t.meta).map(function (m) { return [m, esc(typeof t.meta[m] === 'object' ? JSON.stringify(t.meta[m]) : t.meta[m])]; }))) : '') +
+          (t.meta && Object.keys(t.meta).filter(function (m) { return ['source', 'assistantConversationId', 'reason'].indexOf(m) < 0; }).length ? section('Device', kv(Object.keys(t.meta).filter(function (m) { return ['source', 'assistantConversationId', 'reason'].indexOf(m) < 0; }).map(function (m) { return [m, esc(typeof t.meta[m] === 'object' ? JSON.stringify(t.meta[m]) : t.meta[m])]; }))) : '') +
           (t.kind === 'data_request' ? section('Data request', '<p class="faint">Export or erase their data from the account page.</p><a class="btn" href="#/users/' + esc(u.id) + '">Open account</a>') : '') +
           ((j.otherTickets || []).length ? section('Their other requests', table(['Subject', 'Status'], j.otherTickets, function (o) { return '<tr class="click" data-go="#/support/' + esc(o.id) + '"><td>' + esc(o.subject) + '<div class="faint">' + ago(o.created_at) + '</div></td><td>' + statusBadge(o.status) + '</td></tr>'; })) : '') +
           notesBlock('ticket', t.id, j.notes) + '</div></div>');
         var th = $('#thread'); if (th) th.scrollTop = th.scrollHeight;
         var rb = $('#reply-body'); if (rb) { rb.value = draft; if (first) rb.focus(); }
         bindGo(); bindNotes(); showChip();
+        on('t-take', function () { act(api('/admin/tickets/' + id, { method: 'PATCH', body: { assignedTo: me.id } }), 'Assigned to you'); });
+        on('t-unassign', function () { act(api('/admin/tickets/' + id, { method: 'PATCH', body: { assignedTo: null } }), 'Unassigned'); });
+        on('t-transcript', function () { showAssistantChat(t.meta.assistantConversationId); });
         $$('[data-photo]').forEach(function (b) { b.onclick = function () { lightbox(b.dataset.photo, plainName(u)); }; });
         var fi = $('#reply-file'); if (fi) {
           on('reply-attach', function () { fi.click(); });
@@ -1858,6 +1868,163 @@
       });
       on('au-del', function () { form({ title: 'Delete this automation?', body: 'Its history is deleted too.', confirm: 'Delete', danger: true }).then(function (v) { if (v) api('/admin/mailing/automations/' + id, { method: 'DELETE' }).then(function () { toast('Deleted'); location.hash = '#/mail-automations'; }).catch(function (e) { toast(e.message, true); }); }); });
     }).catch(mailFail);
+  }
+
+  // ═════════ Live chat availability (sidebar switch + heartbeat) ═════════
+  function paintAvail() {
+    var b = $('#avail'); if (!b) return;
+    b.className = 'avail' + (agent.available ? ' on' : '');
+    b.querySelector('span:last-child').textContent = agent.available ? 'Available for live chats' : 'Away from live chats';
+  }
+  function setAvailable(on, quiet) {
+    agent.available = on; paintAvail();
+    return api('/admin/support/me', { method: 'PUT', body: { available: on } }).then(function () { if (!quiet) toast(on ? 'You can now receive chats from the AI Assistant' : 'You won’t get new chats until you switch this back on'); })
+      .catch(function (e) { agent.available = !on; paintAvail(); if (!quiet) toast(e.message, true); });
+  }
+  /** Every minute while the dashboard is open: keeps you "online" and announces chats newly assigned to you. */
+  function heartbeat() {
+    if (!me) return;
+    post('/admin/support/heartbeat').then(function (h) {
+      agent.known = true; if (agent.available !== h.available) { agent.available = h.available; paintAvail(); }
+      (h.waiting || []).forEach(function (t) {
+        if (agent.seen[t.id]) return; agent.seen[t.id] = true;
+        if (agent.primed) toast('New chat for you: ' + t.subject);
+      });
+      agent.primed = true;
+      counts.myChats = (h.waiting || []).length;
+      var nav = $('.nav[href="#/support"]');
+      if (nav) { var b = nav.querySelector('.mine'); if (counts.myChats && !b) nav.insertAdjacentHTML('beforeend', '<span class="badge mine" title="Waiting for you">' + counts.myChats + '</span>'); else if (b) { if (counts.myChats) b.textContent = counts.myChats; else b.remove(); } }
+    }).catch(function () {});
+  }
+  setInterval(function () { if (document.visibilityState === 'visible') heartbeat(); }, 60000);
+  setTimeout(heartbeat, 1500);
+
+  /** Transcript of a chat with the AI Assistant (read-only, audited). */
+  function showAssistantChat(id) {
+    api('/admin/assistant/conversations/' + id).then(function (j) {
+      var c = j.conversation;
+      var html = '<div class="faint">' + userLink(c.user) + ' · ' + label(c.status) + ' · started ' + when(c.created_at) + '</div><div class="msgs thread">' + j.messages.map(function (m) {
+        if (m.role === 'system') return '';
+        var meta = m.meta || {}; var bits = [];
+        if (meta.tools && meta.tools.length) bits.push('looked up: ' + meta.tools.join(', '));
+        if (meta.usage) bits.push((meta.usage.input + meta.usage.output) + ' tokens' + (meta.usage.cacheRead ? ' (' + meta.usage.cacheRead + ' cached)' : ''));
+        if (meta.error) bits.push('error: ' + meta.error);
+        if (meta.refusal !== undefined) bits.push('declined');
+        var acts = (m.actions || []).map(function (a) { return badge('→ ' + a.label, 'grey'); }).join(' ');
+        return '<div class="msg' + (m.role === 'user' ? '' : ' right') + '">' + esc(m.content) + (acts ? '<div style="margin-top:6px">' + acts + '</div>' : '') +
+          '<div class="meta">' + (m.role === 'user' ? plainName(c.user) : 'Assistant') + ' · ' + when(m.created_at) + (m.feedback === 1 ? ' · 👍' : m.feedback === -1 ? ' · 👎' : '') + (bits.length ? ' · ' + esc(bits.join(' · ')) : '') + '</div></div>';
+      }).join('') + '</div>' + (c.ticket_id ? '<p><a href="#/support/' + esc(c.ticket_id) + '">Open the support ticket →</a></p>' : '');
+      form({ title: 'AI Assistant chat', html: html, wide: true, confirm: false });
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  // ═════════ AI Assistant ═════════
+  PAGES.assistant = function (r) {
+    var tab = r.q.tab || 'knowledge';
+    shell('assistant', 'AI Assistant', 'The in-app helper: what it knows, how it’s doing, and who it hands chats to.');
+    api('/admin/assistant/overview').then(function (o) {
+      if (!o.available) return view('<div class="err">Run migration 020_assistant.sql in Supabase to turn on the AI Assistant.</div>');
+      var w = o.week;
+      var stat = function (n, l) { return '<div class="card stat"><span class="n">' + n + '</span><span class="l">' + esc(l) + '</span></div>'; };
+      var rated = w.thumbsUp + w.thumbsDown;
+      var head = (!o.configured ? '<div class="alert bad" style="margin-bottom:14px">Add <b>ANTHROPIC_API_KEY</b> to the server environment to switch the assistant on. Until then the app shows “Contact Support” instead.</div>' : '') +
+        '<div class="card row between" style="margin-bottom:14px"><div class="row">' + (o.enabled ? badge('Live', 'ok') : badge('Off', 'grey')) +
+        '<span class="faint">Model ' + esc(o.model) + ' · effort ' + esc(o.effort) + ' · ' + o.agentsOnline + ' agent' + (o.agentsOnline === 1 ? '' : 's') + ' online for handovers</span></div>' +
+        '<button class="btn ' + (o.enabled ? 'ghost-danger' : 'primary') + '" id="as-toggle"' + (o.configured ? '' : ' disabled') + '>' + (o.enabled ? 'Switch off' : 'Switch on') + '</button></div>' +
+        '<div class="grid cols-4">' + stat(w.chats, 'Chats, last 7 days') + stat(w.messages, 'Questions asked') + stat(w.handoffs, 'Handed to a person') +
+        stat(rated ? Math.round((w.thumbsUp / rated) * 100) + '%' : '—', 'Helpful (' + w.thumbsUp + ' 👍 / ' + w.thumbsDown + ' 👎)') + '</div>' +
+        '<div style="margin-top:18px">' + tabs([['knowledge', 'Knowledge', o.articles], ['chats', 'Chats'], ['test', 'Try it'], ['agents', 'Live agents']], tab, function (t) { return '/assistant' + qs({ tab: t }); }) + '</div><div id="as-body"><div class="spinner">Loading…</div></div>';
+      view(head);
+      on('as-toggle', function () {
+        var go = function () { act(api('/admin/assistant/settings', { method: 'PUT', body: { enabled: !o.enabled } }), o.enabled ? 'Assistant switched off' : 'Assistant is on'); };
+        if (o.enabled) form({ title: 'Switch off the assistant?', body: 'People will see “Contact Support” instead until you switch it back on.', confirm: 'Switch off', danger: true }).then(function (v) { if (v) go(); }); else go();
+      });
+      var body = function (html) { var el = $('#as-body'); if (el) el.innerHTML = html; };
+      ({ knowledge: knowledgeTab, chats: chatsTab, test: testTab, agents: agentsTab }[tab] || knowledgeTab)(r, body);
+    }).catch(fail);
+  };
+
+  function knowledgeTab(_r, body) {
+    api('/admin/assistant/knowledge').then(function (j) {
+      var edit = function (a) {
+        a = a || {};
+        return form({ title: a.id ? 'Edit knowledge' : 'Add knowledge', wide: true, fields: [
+          { name: 'title', label: 'Topic', value: a.title, required: true, placeholder: 'e.g. Christmas holiday support hours' },
+          { name: 'body', label: 'What the assistant should know (plain sentences work best)', type: 'textarea', value: a.body, required: true, placeholder: 'e.g. From 24 Dec to 1 Jan support replies between 9am and 3pm. Payments and escrow keep working as normal.' },
+          { name: 'tags', label: 'Tags (optional, comma separated)', value: (a.tags || []).join(', ') },
+          { name: 'active', label: 'Active: the assistant uses this now', type: 'checkbox', value: a.active !== false }], confirm: 'Save' })
+          .then(function (v) {
+            if (!v) return;
+            var b = { title: v.title, body: v.body, tags: String(v.tags || '').split(',').map(function (t) { return t.trim(); }).filter(Boolean), active: !!v.active };
+            act(a.id ? api('/admin/assistant/knowledge/' + a.id, { method: 'PATCH', body: b }) : post('/admin/assistant/knowledge', b), 'Saved: the assistant uses it within a minute');
+          });
+      };
+      body('<div class="card stack"><div class="row between"><div><h3>Team knowledge</h3><p class="faint" style="margin:4px 0 0">Announcements, policy changes, promos and fixes for wrong answers. The assistant reads these on every chat and they override its built-in guide. No app update needed.</p></div><button class="btn primary" id="kn-add">Add knowledge</button></div>' +
+        table(['Topic', 'Status', 'Updated', ''], j.articles, function (a) {
+          return '<tr><td><b>' + esc(a.title) + '</b><div class="faint clamp">' + esc(a.body) + '</div>' + (a.tags || []).map(function (t) { return badge(t, 'grey'); }).join(' ') + '</td><td>' + (a.active ? badge('active', 'ok') : badge('off', 'grey')) + '</td>' +
+            '<td class="num">' + ago(a.updated_at) + (a.editor ? '<div class="faint">' + name(a.editor) + '</div>' : '') + '</td><td><div class="row" style="justify-content:flex-end"><button class="btn sm" data-ed="' + esc(a.id) + '">Edit</button><button class="btn sm ghost-danger" data-del="' + esc(a.id) + '">Delete</button></div></td></tr>';
+        }, 'Nothing yet. The assistant already knows the app from its built-in guide, the FAQ and live settings; add notes here for anything new.') + '</div>' +
+        '<div class="card stack" style="margin-top:14px"><h3>How the assistant stays up to date</h3><ul class="muted" style="margin:0;padding-left:18px;line-height:1.7">' +
+        '<li><b>Live every chat:</b> fees, cancellation rules, plans and prices, the app banner and maintenance mode, and the person’s own bookings, rent, payments and listings.</li>' +
+        '<li><b>From the app itself:</b> the FAQ, support hours, listing options and screens, refreshed by <code>npm run assistant:sync</code> (runs automatically before starting or publishing the app).</li>' +
+        '<li><b>Product guide:</b> <code>backend/assistant/knowledge.md</code>, updated with the code when a feature changes.</li>' +
+        '<li><b>Team knowledge (this page):</b> anything else, instantly.</li></ul></div>');
+      on('kn-add', function () { edit(); });
+      bind('[data-ed]', function (id) { edit(j.articles.filter(function (a) { return a.id === id; })[0]); });
+      bind('[data-del]', function (id) { form({ title: 'Delete this knowledge?', confirm: 'Delete', danger: true }).then(function (v) { if (v) act(api('/admin/assistant/knowledge/' + id, { method: 'DELETE' }), 'Deleted'); }); });
+    }).catch(function (e) { body('<div class="err">' + esc(e.message) + '</div>'); });
+  }
+
+  function chatsTab(r, body) {
+    var filter = r.q.filter || 'all'; var page = Number(r.q.page || 1);
+    api('/admin/assistant/conversations' + qs({ filter: filter, page: page, limit: PAGE })).then(function (j) {
+      body('<div class="row" style="margin-bottom:10px">' + [['all', 'All chats'], ['handed_off', 'Handed to a person'], ['disliked', 'Marked not helpful']].map(function (f) {
+        return '<a class="btn sm' + (filter === f[0] ? ' primary' : '') + '" href="#/assistant' + qs({ tab: 'chats', filter: f[0] }) + '">' + f[1] + '</a>'; }).join('') + '</div>' +
+        '<div class="card">' + table(['Person', 'Started with', 'Status', 'Last activity'], j.conversations, function (c) {
+          return '<tr class="click" data-chat="' + esc(c.id) + '"><td>' + name(c.user) + '<div class="faint">' + label(c.user && c.user.role) + '</div></td><td class="clamp">' + esc(c.title || '') + '</td><td>' + statusBadge(c.status === 'handed_off' ? 'assigned' : c.status) + '</td><td class="num">' + ago(c.updated_at) + '</td></tr>';
+        }, 'No chats yet.') + '</div>' + pager(page, j.total, r.raw));
+      bind('[data-chat]', function (id) { showAssistantChat(id); });
+    }).catch(function (e) { body('<div class="err">' + esc(e.message) + '</div>'); });
+  }
+
+  function testTab(_r, body) {
+    var history = [];
+    body('<div class="card stack"><div class="row between"><h3>Try the assistant</h3><div class="row"><label class="faint">Answer as a</label><select class="input sm" id="tt-role">' +
+      ROLE_OPTS.filter(function (o) { return o[0] !== 'admin'; }).map(function (o) { return '<option value="' + o[0] + '">' + o[1].replace(/s$/, '') + '</option>'; }).join('') + '</select><button class="btn sm" id="tt-clear">Clear</button></div></div>' +
+      '<p class="faint" style="margin:0">Nothing is saved or sent to users. Questions about “my” bookings, rent etc. use your own admin account’s data. Use this to check a new knowledge note.</p>' +
+      '<div class="msgs thread" id="tt-log"><div class="empty">Ask something a user might ask.</div></div>' +
+      '<form class="row" id="tt-form"><input class="input" id="tt-q" style="flex:1" placeholder="e.g. How do refunds work if the agent doesn’t show up?"><button class="btn primary">Ask</button></form></div>');
+    var log = $('#tt-log');
+    var add = function (role, html) { if (!history.length && log.querySelector('.empty')) log.innerHTML = ''; log.insertAdjacentHTML('beforeend', '<div class="msg' + (role === 'user' ? '' : ' right') + '">' + html + '</div>'); log.scrollTop = log.scrollHeight; };
+    on('tt-clear', function () { history = []; log.innerHTML = '<div class="empty">Ask something a user might ask.</div>'; });
+    $('#tt-form').onsubmit = function (e) {
+      e.preventDefault(); var q = $('#tt-q').value.trim(); if (!q) return;
+      add('user', esc(q)); $('#tt-q').value = ''; var btn = $('#tt-form button'); btn.disabled = true; btn.textContent = 'Thinking…';
+      post('/admin/assistant/test', { text: q, asRole: $('#tt-role').value, history: history }).then(function (res) {
+        history.push({ role: 'user', content: q }, { role: 'assistant', content: res.reply }); history = history.slice(-20);
+        var meta = res.meta || {};
+        add('assistant', esc(res.reply) + ((res.actions || []).length ? '<div style="margin-top:6px">' + res.actions.map(function (a) { return badge('→ ' + a.label + ' (' + a.screen + ')', 'grey'); }).join(' ') + '</div>' : '') +
+          (res.handoff ? '<div style="margin-top:6px">' + badge('would hand over: ' + res.handoff.reason, 'warn') + '</div>' : '') +
+          '<div class="meta">' + esc([(meta.tools || []).length ? 'looked up ' + meta.tools.join(', ') : 'no lookups', meta.usage ? (meta.usage.input + meta.usage.output) + ' tokens, ' + (meta.usage.cacheRead || 0) + ' from cache' : '', meta.error ? 'error: ' + meta.error : ''].filter(Boolean).join(' · ')) + '</div>');
+      }).catch(function (err) { add('assistant', '<span style="color:var(--danger)">' + esc(err.message) + '</span>'); })
+        .then(function () { btn.disabled = false; btn.textContent = 'Ask'; });
+    };
+  }
+
+  function agentsTab(_r, body) {
+    api('/admin/support/agents').then(function (j) {
+      body('<div class="card stack"><div><h3>Who takes chats from the assistant</h3><p class="faint" style="margin:4px 0 0">When someone asks for a person, the chat goes to the available admin with the fewest open chats (and under their limit). Available = the sidebar switch is on and their dashboard is open. If nobody is available, it waits in Support → Unassigned and the support email is alerted.</p></div>' +
+        table(['Admin', 'Status', 'Open chats', 'Limit', ''], j.agents, function (a) {
+          var st = a.available && a.online ? badge('available', 'ok') : a.available ? badge('available, dashboard closed', 'warn') : badge('away', 'grey');
+          return '<tr><td><div class="row">' + avatar(a) + '<div>' + name(a) + (a.id === me.id ? ' ' + badge('you', 'grey') : '') + '<div class="faint">' + esc(a.email || '') + '</div></div></div></td><td>' + st + (a.lastSeenAt ? '<div class="faint">seen ' + ago(a.lastSeenAt) + '</div>' : '') + '</td>' +
+            '<td class="num">' + a.openChats + '</td><td class="num">' + a.maxOpen + '</td><td>' + (a.id === me.id ? '<button class="btn sm" id="ag-limit">Change my limit</button>' : '') + '</td></tr>';
+        }) + '</div>');
+      on('ag-limit', function () {
+        var mine = j.agents.filter(function (a) { return a.id === me.id; })[0] || {};
+        form({ title: 'Your chat limit', body: 'The most open chats you want assigned to you at once.', fields: [{ name: 'maxOpen', label: 'Limit', type: 'number', value: mine.maxOpen || 15, required: true }], confirm: 'Save' })
+          .then(function (v) { if (v) act(api('/admin/support/me', { method: 'PUT', body: { maxOpen: Math.max(1, Math.min(500, Math.round(v.maxOpen))) } }), 'Limit saved'); });
+      });
+    }).catch(function (e) { body('<div class="err">' + esc(e.message) + '</div>'); });
   }
 
   // Keep nav badges fresh without reloading everything.

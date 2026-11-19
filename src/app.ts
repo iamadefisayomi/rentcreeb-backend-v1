@@ -34,6 +34,7 @@ import supportRoutes from './routes/support.routes';
 import documentsRoutes from './routes/documents.routes';
 import keepAliveRoutes from './routes/keep-alive.routes';
 import mailRoutes from './routes/mail.routes';
+import assistantRoutes from './routes/assistant.routes';
 
 export function createApp() {
   const app = express();
@@ -97,6 +98,7 @@ export function createApp() {
   v1.use('/artisan', artisanRoutes);
   v1.use('/dashboard', dashboardRoutes);
   v1.use('/support', supportRoutes);
+  v1.use('/assistant', assistantRoutes);
   v1.use('/documents', documentsRoutes);
   v1.use('/admin', adminRoutes);
   // Maintenance mode (env MAINTENANCE_MODE or the admin dashboard switch). Admins can still sign in and work.

@@ -1,0 +1,273 @@
+{
+  "generatedAt": "2026-11-19T20:59:05.777Z",
+  "appVersion": "1.0.0",
+  "supportHours": "Mon – Sat, 8am – 8pm WAT",
+  "faq": [
+    {
+      "topic": "Getting started",
+      "items": [
+        {
+          "q": "Why do I need to verify my identity?",
+          "a": "Verification (NIN + selfie) keeps scammers off RentCreeb. Verified users get a badge, and some actions — like booking inspections, listing properties or receiving payouts — need it. Go to Settings → Identity Verification."
+        },
+        {
+          "q": "Can I change my account type?",
+          "a": "Your role (tenant, landlord, agent, artisan…) is set during sign-up and can’t be changed afterwards. If you need a different role, contact support and we will help."
+        },
+        {
+          "q": "How do I update my phone number or email?",
+          "a": "Open Settings → Personal Information. Changing your phone number requires a new OTP."
+        }
+      ]
+    },
+    {
+      "topic": "Inspections & bookings",
+      "items": [
+        {
+          "q": "How does booking an inspection work?",
+          "a": "Pick a date and time on the property page and pay the inspection fee. Your money is held safely until the inspection happens. At the property, share your booking OTP with the agent to confirm you attended."
+        },
+        {
+          "q": "When should I share my inspection OTP?",
+          "a": "Only when you are physically at the property with the agent. Never share it over the phone or by message before you arrive."
+        },
+        {
+          "q": "Can I cancel or reschedule?",
+          "a": "Yes, from My Bookings. Cancelling within the free-cancellation window is free; after that a small charge applies, shown before you confirm."
+        },
+        {
+          "q": "The agent didn’t show up. What now?",
+          "a": "Open the booking and tap “Report agent”. We investigate every report and refund you if the agent was at fault."
+        }
+      ]
+    },
+    {
+      "topic": "Payments & wallet",
+      "items": [
+        {
+          "q": "Is my money safe?",
+          "a": "Payments go through Paystack, a licensed payment processor, and are held in escrow until the service is delivered. RentCreeb never stores your card details."
+        },
+        {
+          "q": "How long do withdrawals take?",
+          "a": "Withdrawals to your saved bank account are usually instant, but can take up to 24 hours depending on your bank."
+        },
+        {
+          "q": "Why was I charged a platform fee?",
+          "a": "A small fee is deducted from payments to agents and artisans to cover escrow, verification and support. It is always shown before you pay."
+        },
+        {
+          "q": "Which currencies are supported?",
+          "a": "All payments on RentCreeb are in Nigerian Naira (₦)."
+        }
+      ]
+    },
+    {
+      "topic": "RentSave",
+      "items": [
+        {
+          "q": "What is RentSave?",
+          "a": "RentSave helps you save towards your next rent in small, scheduled amounts so you are not caught out when rent is due."
+        },
+        {
+          "q": "Can I withdraw my RentSave early?",
+          "a": "You can pause or withdraw from the RentSave screen. Any conditions that apply are shown before you confirm."
+        }
+      ]
+    },
+    {
+      "topic": "Maintenance & artisans",
+      "items": [
+        {
+          "q": "How do I report a repair?",
+          "a": "Tenants can raise a maintenance request from the Maintenance screen with photos. Your landlord reviews it and can assign a vetted artisan."
+        },
+        {
+          "q": "How are artisans vetted?",
+          "a": "Artisans verify their identity, provide references and are rated after every job. Payment is only released when the landlord approves the completed work."
+        }
+      ]
+    },
+    {
+      "topic": "Safety & account",
+      "items": [
+        {
+          "q": "Someone asked me to pay outside the app",
+          "a": "Don’t. It is the most common scam. Payments outside RentCreeb aren’t protected. Report the user from the chat or booking, or contact support."
+        },
+        {
+          "q": "How do I delete my account?",
+          "a": "Settings → Delete Account. You will need to withdraw any wallet balance and finish or cancel upcoming inspections first."
+        },
+        {
+          "q": "How do I get a copy of my data?",
+          "a": "Settings → Privacy Settings → Request my data. We will email you a copy within 30 days."
+        }
+      ]
+    }
+  ],
+  "listing": {
+    "types": [
+      "apartment",
+      "duplex",
+      "bungalow",
+      "studio",
+      "terrace",
+      "self-contain",
+      "commercial",
+      "land"
+    ],
+    "commercialUses": [
+      "Office space",
+      "Shop",
+      "Warehouse",
+      "Event centre",
+      "Showroom",
+      "Restaurant",
+      "Hotel",
+      "Filling station",
+      "Mixed use"
+    ],
+    "landTitles": [
+      "Certificate of Occupancy (C of O)",
+      "Governor's Consent",
+      "Deed of Assignment",
+      "Registered Survey",
+      "Excision / Gazette",
+      "Family receipt"
+    ],
+    "videoHosts": "YouTube, Vimeo, TikTok, Instagram, Facebook, Loom, Dailymotion or Streamable",
+    "maxVideoLinks": 5
+  },
+  "screens": [
+    "AddListing",
+    "AddProperty",
+    "AddTenancy",
+    "AgentAnalytics",
+    "AgentProfile",
+    "AgentReviews",
+    "AgentTabs",
+    "AllTransactions",
+    "ApproveRepair",
+    "ArtisanEditProfile",
+    "ArtisanPublicProfile",
+    "ArtisanRegister",
+    "ArtisanReviews",
+    "ArtisanSubmitted",
+    "ArtisanTabs",
+    "Assistant",
+    "BookInspection",
+    "BookingDetail",
+    "BookingOtp",
+    "BookingSuccess",
+    "BookingSummary",
+    "Bookings",
+    "Chat",
+    "Chats",
+    "CompleteJob",
+    "ContactSupport",
+    "CookiePreferences",
+    "CurrencySettings",
+    "DeleteAccount",
+    "Documents",
+    "Earnings",
+    "Explore",
+    "ExportReport",
+    "HelpFaq",
+    "Home",
+    "InspectionOtp",
+    "InspectionReport",
+    "JobDetail",
+    "Jobs",
+    "LandlordJob",
+    "LandlordReports",
+    "LandlordTabs",
+    "LanguageSettings",
+    "LeaveReview",
+    "LegalDoc",
+    "Listings",
+    "MaintenanceList",
+    "MaintenanceReports",
+    "MaintenanceRequest",
+    "MaintenanceReview",
+    "MaintenanceTracking",
+    "ManualReview",
+    "MyBookings",
+    "MyWork",
+    "NearbyPlaces",
+    "NinInput",
+    "NotificationSettings",
+    "PasswordSecurity",
+    "PaymentDetail",
+    "PaymentWebView",
+    "PersonalInfo",
+    "Plans",
+    "PrivacySettings",
+    "Profile",
+    "Properties",
+    "PropertyDetail",
+    "PropertyManage",
+    "QuoteSubmitted",
+    "RateApp",
+    "RateArtisan",
+    "RecordPayment",
+    "RenewLease",
+    "RentCollection",
+    "RentDashboard",
+    "RentSave",
+    "RentSavePay",
+    "RentSaveSetup",
+    "Repairs",
+    "ReplyReview",
+    "ReportAgent",
+    "ReportBug",
+    "Reports",
+    "Reviews",
+    "ScamInfo",
+    "Selfie",
+    "SendReminders",
+    "Settings",
+    "SubmitQuote",
+    "SubscriptionActive",
+    "TenancyDetail",
+    "TenantTabs",
+    "Tenants",
+    "TerminateLease",
+    "TodaysInspections",
+    "TransactionDetail",
+    "Transactions",
+    "ValidateInspection",
+    "Verifying",
+    "WalletScreen"
+  ],
+  "tabs": {
+    "tenant": [
+      "Home",
+      "Explore",
+      "MyBookings",
+      "Chats",
+      "Profile"
+    ],
+    "artisan": [
+      "Home",
+      "Jobs",
+      "MyWork",
+      "Earnings",
+      "Profile"
+    ],
+    "agent": [
+      "Home",
+      "Listings",
+      "Bookings",
+      "Chats",
+      "Profile"
+    ],
+    "landlord": [
+      "Home",
+      "Properties",
+      "Tenants",
+      "Repairs",
+      "Reports"
+    ]
+  }
+}
