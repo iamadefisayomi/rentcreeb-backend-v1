@@ -5,7 +5,7 @@ import { badRequest, notFound } from '../../lib/errors';
 import { paginate, uuid } from '../../lib/common';
 import { env } from '../../config/env';
 import { PERSON, audit } from './shared';
-import { assistantModel, assistantReply, availableAgentCount, refreshAssistantKnowledge, suggestionsFor } from '../../services/assistant';
+import { assistantModel, assistantProvider, assistantReply, availableAgentCount, refreshAssistantKnowledge, suggestionsFor } from '../../services/assistant';
 import { assistantEnabled, resetAssistantEnabledCache } from '../assistant.routes';
 
 /**
@@ -25,7 +25,8 @@ export function mountAssistant(r: Router) {
       c('assistant_messages', (q) => q.eq('feedback', 1).gte('created_at', since)), c('assistant_messages', (q) => q.eq('feedback', -1).gte('created_at', since)),
       c('assistant_knowledge', (q) => q.eq('active', true)),
     ]);
-    res.json({ available: true, enabled: await assistantEnabled(), configured: !!env.ANTHROPIC_API_KEY, model: assistantModel(), effort: env.ASSISTANT_EFFORT,
+    const provider = assistantProvider();
+    res.json({ available: true, enabled: await assistantEnabled(), configured: !!provider, provider: provider === 'anthropic' ? 'Claude' : provider === 'openai' ? 'NVIDIA' : null, model: assistantModel(), effort: provider === 'anthropic' ? env.ASSISTANT_EFFORT : null,
       week: { chats, messages: msgs, handoffs, thumbsUp: up, thumbsDown: down }, articles, agentsOnline: await availableAgentCount() });
   });
   r.put('/assistant/settings', async (req, res) => {
@@ -93,7 +94,7 @@ export function mountAssistant(r: Router) {
   r.post('/assistant/test', async (req, res) => {
     const b = z.object({ text: z.string().trim().min(1).max(2000), asRole: z.enum(['tenant', 'agent', 'landlord', 'estate_manager', 'artisan']).default('tenant'),
       history: z.array(z.object({ role: z.enum(['user', 'assistant']), content: z.string().max(4000) })).max(20).default([]) }).parse(req.body);
-    if (!env.ANTHROPIC_API_KEY) throw badRequest('Set ANTHROPIC_API_KEY on the server to use the assistant', 'NOT_CONFIGURED');
+    if (!assistantProvider()) throw badRequest('Set ANTHROPIC_API_KEY or NVIDIA_API_KEY on the server to use the assistant', 'NOT_CONFIGURED');
     const out = await assistantReply({ ...(req.user as any), role: b.asRole }, b.history, b.text);
     res.json({ reply: out.text, actions: out.actions, handoff: out.handoff, meta: out.meta, suggestions: suggestionsFor(b.asRole) });
   });

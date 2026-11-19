@@ -6,7 +6,7 @@ import { badRequest, notFound } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { authenticate } from '../middleware/auth';
-import { SUPPORT_HOURS, assistantReply, availableAgentCount, handOverToHuman, suggestionsFor } from '../services/assistant';
+import { SUPPORT_HOURS, assistantProvider, assistantReply, availableAgentCount, handOverToHuman, suggestionsFor } from '../services/assistant';
 
 /** RentCreeb Assistant for app users (see services/assistant.ts). */
 const r = Router();
@@ -15,7 +15,7 @@ r.use(authenticate);
 let enabledCache: { at: number; on: boolean } | null = null;
 /** Admins can switch the assistant off from the dashboard (app_settings.assistant_enabled = false). */
 export async function assistantEnabled() {
-  if (!env.ANTHROPIC_API_KEY) return false;
+  if (!assistantProvider()) return false;
   if (enabledCache && Date.now() - enabledCache.at < 30_000) return enabledCache.on;
   const { data } = await db.from('app_settings').select('value').eq('key', 'assistant_enabled').maybeSingle();
   enabledCache = { at: Date.now(), on: data?.value !== false };

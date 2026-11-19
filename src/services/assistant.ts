@@ -9,6 +9,7 @@ import { yearlyPrice } from '../routes/subscriptions.routes';
 import { getSettings } from './settings';
 import { notify } from './notify';
 import { ensureTicketConversation } from './supportChat';
+import { aiEnabled, aiToolChat, type AiChatMessage, type AiTool } from '../lib/ai';
 
 /**
  * RentCreeb Assistant: in-app help powered by Claude (Messages API, manual tool loop).
@@ -25,7 +26,17 @@ import { ensureTicketConversation } from './supportChat';
 export type AssistantAction = { label: string; screen: string; params?: Record<string, string> };
 type Profile = { id: string; role: string; first_name?: string | null; last_name?: string | null; email?: string | null; phone?: string | null; nin_verified?: boolean; phone_verified?: boolean; created_at?: string };
 
-export const assistantModel = () => env.ASSISTANT_MODEL ?? env.CLAUDE_MODEL;
+/**
+ * Which AI answers: Claude when ANTHROPIC_API_KEY is set, otherwise the OpenAI-compatible provider already used for
+ * listing reviews (NVIDIA by default). Force one with ASSISTANT_PROVIDER=anthropic|openai.
+ */
+export function assistantProvider(): 'anthropic' | 'openai' | null {
+  const p = env.ASSISTANT_PROVIDER;
+  if (p === 'anthropic') return env.ANTHROPIC_API_KEY ? 'anthropic' : null;
+  if (p === 'openai') return aiEnabled() ? 'openai' : null;
+  return env.ANTHROPIC_API_KEY ? 'anthropic' : aiEnabled() ? 'openai' : null;
+}
+export const assistantModel = () => (assistantProvider() === 'openai' ? env.ASSISTANT_MODEL ?? env.AI_MODEL : env.ASSISTANT_MODEL ?? env.CLAUDE_MODEL);
 let client: Anthropic | null = null;
 const anthropic = () => (client ??= new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 2, timeout: 90_000 }));
 
@@ -66,7 +77,7 @@ You help tenants, agents, landlords, estate managers and artisans with anything 
 How to answer:
 - Be warm, clear and brief: a few short sentences or a short numbered list of steps. Plain text; you may use **bold** and "- " bullets. No headings or tables.
 - Use the person's own data when the question is about them: call the matching get_my_… tool instead of guessing, and quote real dates, amounts and statuses. Amounts are in naira (₦).
-- When a screen in the app is the next step, call show_buttons so they can open it with one tap (at most 3 buttons). Use params.id only with an id you got from a tool.
+- Whenever a screen in the app is the next step, call show_buttons in the same reply so they can open it with one tap (at most 3 buttons; pass the record id from a tool when the screen takes one). Never ask "Would you like me to open…?": just show the button and mention it, e.g. "Tap **Open My Bookings** below." After a handover, show a Chats button.
 - To find homes, use search_properties and offer the best matches as PropertyDetail buttons.
 - Only state facts from this prompt or from tool results. If you don't know, say so and offer to connect them with the support team. Never invent fees, policies, prices, refund decisions or timelines.
 - You cannot move money, cancel or change bookings, approve anything or change account data yourself. Explain where in the app they can do it, or hand over to a person.
@@ -247,6 +258,24 @@ export async function runTool(name: string, input: any, ctx: TurnCtx): Promise<u
   }
 }
 
+// ───────── safety net: a reply that mentions a button it didn't attach ─────────
+/** Words people (and the model) use for a screen → the screen. Checked longest first. */
+const SCREEN_WORDS: [RegExp, string][] = [
+  [/identity|verif|nin\b/i, 'NinInput'], [/rent ?save/i, 'RentSave'], [/rent collection|collect rent/i, 'RentCollection'], [/rent( dashboard)?\b/i, 'RentDashboard'],
+  [/booking/i, 'MyBookings'], [/message|chat/i, 'Chats'], [/wallet|withdraw/i, 'WalletScreen'], [/earning/i, 'Earnings'], [/transaction|payment history|receipt/i, 'Transactions'],
+  [/maintenance|repair/i, 'MaintenanceList'], [/contact support|support/i, 'ContactSupport'], [/faq|help/i, 'HelpFaq'], [/report a bug|bug/i, 'ReportBug'],
+  [/notification/i, 'NotificationSettings'], [/privacy|my data/i, 'PrivacySettings'], [/personal info|profile/i, 'PersonalInfo'], [/password|security/i, 'PasswordSecurity'],
+  [/delete account/i, 'DeleteAccount'], [/document/i, 'Documents'], [/plan|subscription/i, 'Plans'], [/add (a )?listing|new listing|create (a )?listing/i, 'AddListing'],
+  [/analytics/i, 'AgentAnalytics'], [/add (a )?tenan/i, 'AddTenancy'], [/saved/i, 'Saved'], [/search|explore|propert/i, 'Explore'], [/scam|safety/i, 'ScamInfo'], [/setting/i, 'Settings'],
+];
+function addMissingButtons(text: string, ctx: TurnCtx) {
+  if (ctx.actions.length) return;
+  for (const m of text.matchAll(/\*\*((?:Open|Go to|View|Start|Contact)[^*]{2,40})\*\*/g)) {
+    const label = m[1].trim(); const hit = SCREEN_WORDS.find(([re]) => re.test(label.replace(/^(open|go to|view|start)\s+/i, '')));
+    if (hit && ALLOWED_SCREENS.has(hit[1]) && !ctx.actions.some((a) => a.screen === hit[1]) && ctx.actions.length < 3) ctx.actions.push({ label: label.slice(0, 40), screen: hit[1] });
+  }
+}
+
 // ───────── a turn ─────────
 export type TurnResult = { text: string; actions: AssistantAction[]; handoff: { reason: string } | null; meta: Record<string, unknown> };
 type HistoryItem = { role: 'user' | 'assistant'; content: string };
@@ -255,7 +284,8 @@ type HistoryItem = { role: 'user' | 'assistant'; content: string };
 export async function assistantReply(user: Profile, history: HistoryItem[], text: string): Promise<TurnResult> {
   const ctx: TurnCtx = { user, actions: [], handoff: null, used: [] };
   const fail = (why: string): TurnResult => ({ text: "Sorry, I'm having trouble answering right now. You can try again in a moment, or tap “Talk to a person” and our support team will help.", actions: [{ label: 'Contact Support', screen: 'ContactSupport' }], handoff: null, meta: { error: why } });
-  if (!env.ANTHROPIC_API_KEY) return fail('ANTHROPIC_API_KEY not set');
+  const provider = assistantProvider();
+  if (!provider) return fail('no AI provider configured (ANTHROPIC_API_KEY or NVIDIA_API_KEY)');
 
   // Text history only: the model's thinking and tool calls from earlier turns are not replayed.
   const messages: Anthropic.Beta.BetaMessageParam[] = [];
@@ -268,6 +298,8 @@ export async function assistantReply(user: Profile, history: HistoryItem[], text
   while (messages.length && messages[0].role !== 'user') messages.shift();
   if (messages.length && messages[messages.length - 1].role === 'user') messages[messages.length - 1].content = `${messages[messages.length - 1].content as string}\n\n${text}`;
   else messages.push({ role: 'user', content: text });
+
+  if (provider === 'openai') return openAiTurn(ctx, messages as HistoryItem[], user, fail);
 
   const system: Anthropic.Beta.BetaTextBlockParam[] = [
     { type: 'text', text: STATIC_PROMPT, cache_control: { type: 'ephemeral' } },
@@ -314,7 +346,50 @@ export async function assistantReply(user: Profile, history: HistoryItem[], text
     return fail(err instanceof Anthropic.APIError ? `api ${err.status}` : 'network');
   }
   if (!finalText) finalText = ctx.handoff ? "I'm passing you to our support team now." : "Sorry, I couldn't put an answer together. Could you rephrase that?";
+  addMissingButtons(finalText, ctx);
   return { text: finalText, actions: ctx.actions, handoff: ctx.handoff, meta: { tools: ctx.used, usage, model: assistantModel() } };
+}
+
+/**
+ * Some open models think out loud in <think> tags, or write a tool call into the text as raw template tokens
+ * ("<|tool_call|>…") instead of using the API. Users must never see either.
+ */
+export function cleanModelText(s: string) {
+  return s.replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\|tool_call\|>[\s\S]*$/i, '').replace(/<tool_call>[\s\S]*$/i, '')
+    .replace(/<\|[a-z_]+\|>/gi, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// ───────── OpenAI-compatible providers (NVIDIA build.nvidia.com by default) ─────────
+const OPENAI_TOOLS: AiTool[] = TOOLS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description ?? '', parameters: t.input_schema as Record<string, unknown> } }));
+
+/** Same behaviour as the Claude loop, over the chat-completions "function calling" API. */
+async function openAiTurn(ctx: TurnCtx, history: HistoryItem[], user: Profile, fail: (why: string) => TurnResult): Promise<TurnResult> {
+  const system = [STATIC_PROMPT, await livePrompt().catch(() => ''), personPrompt(user)].filter(Boolean).join('\n\n');
+  const messages: AiChatMessage[] = [{ role: 'system', content: system }, ...history.map((h) => ({ role: h.role, content: h.content }) as AiChatMessage)];
+  const usage = { input: 0, output: 0 };
+  let finalText = '';
+  for (let step = 0; step < 6; step++) {
+    const res = await aiToolChat(messages, OPENAI_TOOLS, { model: assistantModel(), maxTokens: 1500, temperature: 0.3, timeoutMs: 60_000 });
+    if (!res) return { ...fail('provider error or rate limit'), meta: { error: 'provider error or rate limit', usage, model: assistantModel() } };
+    usage.input += res.usage.input; usage.output += res.usage.output;
+    // Some models think out loud in <think> tags: never show that to users.
+    const said = cleanModelText(res.content ?? '');
+    if (said) finalText = said;
+    if (!res.toolCalls.length) break;
+    messages.push({ role: 'assistant', content: res.content ?? '', tool_calls: res.toolCalls });
+    const results = await Promise.all(res.toolCalls.map(async (c) => {
+      ctx.used.push(c.function.name);
+      let input: unknown = {};
+      try { input = c.function.arguments ? JSON.parse(c.function.arguments) : {}; } catch { return { id: c.id, content: JSON.stringify({ error: 'Arguments were not valid JSON. Try again.' }) }; }
+      try { return { id: c.id, content: JSON.stringify(await runTool(c.function.name, input, ctx)) }; }
+      catch (err) { logger.warn({ err, tool: c.function.name }, 'assistant tool failed'); return { id: c.id, content: JSON.stringify({ error: 'That lookup failed. Answer without it or offer the support team.' }) }; }
+    }));
+    for (const r of results) messages.push({ role: 'tool', tool_call_id: r.id, content: r.content });
+  }
+  if (!finalText) finalText = ctx.handoff ? "I'm passing you to our support team now." : "Sorry, I couldn't put an answer together. Could you rephrase that?";
+  addMissingButtons(finalText, ctx);
+  return { text: finalText, actions: ctx.actions, handoff: ctx.handoff, meta: { tools: ctx.used, usage, model: assistantModel(), provider: 'openai' } };
 }
 
 // ───────── human handover ─────────

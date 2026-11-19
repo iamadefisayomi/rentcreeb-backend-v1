@@ -81,3 +81,52 @@ export async function aiHealth(): Promise<{ ok: boolean; model: string; detail?:
     return has ? { ok: true, model: env.AI_MODEL } : { ok: false, model: env.AI_MODEL, detail: 'Model not offered by this provider: set AI_MODEL' };
   } catch (err) { return { ok: false, model: env.AI_MODEL, detail: String((err as Error)?.message ?? err) }; }
 }
+
+// ───────── Tool calling (OpenAI "function calling" format), used by the RentCreeb Assistant ─────────
+export type AiTool = { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } };
+export type AiToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } };
+export type AiChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: AiToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string };
+export type AiToolReply = { content: string | null; toolCalls: AiToolCall[]; finishReason: string | null; usage: { input: number; output: number } };
+
+/**
+ * One chat completion that may ask for tool calls. Returns null on any failure (rate limit, network, bad key) so the
+ * caller can apologise instead of crashing. Shares the per-minute limiter with every other AI call.
+ */
+export async function aiToolChat(messages: AiChatMessage[], tools: AiTool[], opts: { model?: string; maxTokens?: number; temperature?: number; timeoutMs?: number } = {}): Promise<AiToolReply | null> {
+  if (!aiEnabled()) return null;
+  await slot();
+  const model = opts.model ?? env.AI_MODEL;
+  try {
+    const res = await fetch(`${env.AI_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        model, messages, tools, tool_choice: 'auto', max_tokens: opts.maxTokens ?? 1500, temperature: opts.temperature ?? 0.3,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
+    });
+    const json: any = await res.json().catch(() => ({}));
+    if (res.status === 429) {
+      const wait = Math.min(120, Math.max(5, Number(res.headers.get('retry-after')) || 30)) * 1000;
+      nextSlot = Math.max(nextSlot, Date.now() + wait);
+      logger.warn({ waitSec: wait / 1000 }, 'AI provider rate limit: backing off');
+      return null;
+    }
+    if (!res.ok) { logger.warn({ status: res.status, detail: json?.detail ?? json?.error?.message ?? json?.message, model }, 'AI tool request failed'); return null; }
+    const choice = json?.choices?.[0];
+    const msg = choice?.message ?? {};
+    return {
+      content: typeof msg.content === 'string' ? msg.content : null,
+      toolCalls: Array.isArray(msg.tool_calls) ? msg.tool_calls.filter((c: any) => c?.function?.name) : [],
+      finishReason: choice?.finish_reason ?? null,
+      usage: { input: json?.usage?.prompt_tokens ?? 0, output: json?.usage?.completion_tokens ?? 0 },
+    };
+  } catch (err) {
+    logger.warn({ err: String((err as Error)?.message ?? err), model }, 'AI tool request error');
+    return null;
+  }
+}

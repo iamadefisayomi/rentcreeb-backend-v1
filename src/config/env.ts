@@ -79,6 +79,8 @@ const schema = z.object({
   CLAUDE_EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
   /** RentCreeb Assistant (in-app help chat). Model defaults to CLAUDE_MODEL; chat replies do well at low effort (fast, cheaper). */
   ASSISTANT_MODEL: z.string().optional(),
+  /** auto (default) = Claude if ANTHROPIC_API_KEY is set, else the AI_* provider (NVIDIA). Or force anthropic / openai. */
+  ASSISTANT_PROVIDER: z.enum(['auto', 'anthropic', 'openai']).default('auto'),
   ASSISTANT_EFFORT: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('low'),
 
   // AI fallback (any OpenAI-compatible chat API; defaults to NVIDIA's free API at build.nvidia.com). Unset key = off.

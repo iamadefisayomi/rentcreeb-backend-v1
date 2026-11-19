@@ -1927,9 +1927,9 @@
       var w = o.week;
       var stat = function (n, l) { return '<div class="card stat"><span class="n">' + n + '</span><span class="l">' + esc(l) + '</span></div>'; };
       var rated = w.thumbsUp + w.thumbsDown;
-      var head = (!o.configured ? '<div class="alert bad" style="margin-bottom:14px">Add <b>ANTHROPIC_API_KEY</b> to the server environment to switch the assistant on. Until then the app shows “Contact Support” instead.</div>' : '') +
+      var head = (!o.configured ? '<div class="alert bad" style="margin-bottom:14px">Add <b>NVIDIA_API_KEY</b> (or <b>ANTHROPIC_API_KEY</b>) to the server environment to switch the assistant on. Until then the app shows “Contact Support” instead.</div>' : '') +
         '<div class="card row between" style="margin-bottom:14px"><div class="row">' + (o.enabled ? badge('Live', 'ok') : badge('Off', 'grey')) +
-        '<span class="faint">Model ' + esc(o.model) + ' · effort ' + esc(o.effort) + ' · ' + o.agentsOnline + ' agent' + (o.agentsOnline === 1 ? '' : 's') + ' online for handovers</span></div>' +
+        '<span class="faint">' + esc(o.provider || '') + ' · ' + esc(o.model) + (o.effort ? ' · effort ' + esc(o.effort) : '') + ' · ' + o.agentsOnline + ' agent' + (o.agentsOnline === 1 ? '' : 's') + ' online for handovers</span></div>' +
         '<button class="btn ' + (o.enabled ? 'ghost-danger' : 'primary') + '" id="as-toggle"' + (o.configured ? '' : ' disabled') + '>' + (o.enabled ? 'Switch off' : 'Switch on') + '</button></div>' +
         '<div class="grid cols-4">' + stat(w.chats, 'Chats, last 7 days') + stat(w.messages, 'Questions asked') + stat(w.handoffs, 'Handed to a person') +
         stat(rated ? Math.round((w.thumbsUp / rated) * 100) + '%' : '—', 'Helpful (' + w.thumbsUp + ' 👍 / ' + w.thumbsDown + ' 👎)') + '</div>' +
