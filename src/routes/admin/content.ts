@@ -260,12 +260,17 @@ export function mountContent(r: Router) {
   });
   /** Answer in the thread. Optional status change in the same step (e.g. reply and resolve, reply and close). */
   r.post('/tickets/:id/messages', async (req, res) => {
-    const b = z.object({ body: z.string().trim().min(1).max(4000), status: z.enum(['open', 'in_progress', 'resolved', 'closed']).optional() }).parse(req.body);
+    const b = z.object({
+      body: z.string().trim().max(4000).default(''), status: z.enum(['open', 'in_progress', 'resolved', 'closed']).optional(),
+      // A photo or file uploaded first with POST /uploads?folder=chat-files (must be this admin's own upload).
+      attachment: z.object({ path: z.string().startsWith(`chat-files/${req.user.id}/`).max(500), name: z.string().trim().min(1).max(200), type: z.string().max(120), size: z.number().int().min(0).max(50 * 1024 * 1024) }).optional(),
+    }).parse(req.body);
+    if (!b.body && !b.attachment) throw badRequest('Write a reply or attach a file');
     const t = unwrapMaybe(await db.from('support_tickets').select('*').eq('id', uuid.parse(req.params.id)).maybeSingle()) as Ticket | null;
     if (!t) throw notFound('Ticket not found');
-    const message = await postStaffReply(t, req.user.id, b.body);
+    const message = await postStaffReply(t, req.user.id, b.body, b.attachment);
     if (b.status && b.status !== 'in_progress') await setTicketStatus({ ...t, status: t.status === 'open' ? 'in_progress' : t.status }, req.user.id, b.status);
-    await audit(req, 'ticket.reply', 'ticket', t.id, { length: b.body.length, ...(b.status ? { status: b.status } : {}) });
+    await audit(req, 'ticket.reply', 'ticket', t.id, { length: b.body.length, ...(b.attachment ? { attachment: b.attachment.name } : {}), ...(b.status ? { status: b.status } : {}) });
     res.status(201).json({ message });
   });
   r.patch('/tickets/:id', async (req, res) => {

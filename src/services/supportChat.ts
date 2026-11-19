@@ -51,11 +51,12 @@ export async function postStaffReply(t: Ticket, adminId: string, body: string, a
   const message = unwrap(await db.from('messages').insert(row).select().single());
   const now = new Date().toISOString();
   await db.from('support_tickets').update({
-    awaiting: 'user', last_message_at: now, admin_note: body.slice(0, 2000), updated_at: now,
+    awaiting: 'user', last_message_at: now, admin_note: (body || (attachment ? `[${attachment.name}]` : '')).slice(0, 2000), updated_at: now,
     ...(t.status === 'open' ? { status: 'in_progress' } : {}),
   }).eq('id', t.id);
-  await notify(t.user_id, 'support_update', 'RentCreeb Support replied', body.trim().slice(0, 140) || '📎 Attachment', { conversationId, ticketId: t.id });
-  void emailUser(t, 'RentCreeb Support replied', `<p>${esc(body).replace(/\n/g, '<br/>')}</p>`);
+  const fileLabel = attachment ? (attachment.type.startsWith('image/') ? '📷 Photo' : `📎 ${attachment.name}`) : '📎 Attachment';
+  await notify(t.user_id, 'support_update', 'RentCreeb Support replied', body.trim().slice(0, 140) || fileLabel, { conversationId, ticketId: t.id });
+  void emailUser(t, 'RentCreeb Support replied', (body.trim() ? `<p>${esc(body).replace(/\n/g, '<br/>')}</p>` : '') + (attachment ? `<p>${esc(fileLabel)} (open the app to view it)</p>` : ''));
   return message;
 }
 

@@ -409,3 +409,24 @@ iframe.preview.tall { height: 70vh; }
 .chart .gridline { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
 .chart .axis { stroke: var(--border-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .chart-axis { display: flex; justify-content: space-between; color: var(--faint); font-size: 11.5px; }
+
+/* Photo viewer, reply attachments, video tour cards */
+.lightbox { background: rgba(3, 6, 15, .9); grid-template-rows: 1fr auto; gap: 12px; padding: 24px; }
+.lightbox img { max-width: 100%; max-height: calc(100vh - 110px); object-fit: contain; border-radius: 8px; place-self: center; box-shadow: var(--shadow-lg); }
+.lightbox-bar { display: flex; align-items: center; gap: 8px; justify-content: flex-end; width: min(100%, 900px); place-self: center; color: rgba(255, 255, 255, .7); }
+.lightbox-bar span { margin-right: auto; }
+.att-btn { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; margin-top: 6px; border-radius: var(--radius-xs); }
+.att-btn img.att { margin: 0; transition: opacity .15s; }
+.att-btn:hover img.att { opacity: .88; }
+.file-chip { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card-2); max-width: 420px; }
+.file-chip img, .file-chip .fi { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; flex: none; }
+.file-chip .fi { display: grid; place-items: center; background: var(--danger-tint); color: var(--danger); font-weight: 700; font-size: 11px; }
+.file-chip > div { flex: 1; min-width: 0; overflow: hidden; }
+.file-chip b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.video-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.video-card { display: grid; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; color: inherit; background: var(--card-2); transition: border-color .15s, box-shadow .15s; }
+.video-card:hover { text-decoration: none; border-color: var(--border-strong); box-shadow: var(--shadow-lg); }
+.vthumb { aspect-ratio: 16 / 9; background: #0b1533 center / cover no-repeat; display: grid; place-items: center; }
+.vthumb .play { width: 44px; height: 44px; border-radius: 50%; background: rgba(0, 0, 0, .62); color: #fff; display: grid; place-items: center; font-size: 15px; padding-left: 3px; }
+.vmeta { padding: 9px 12px; display: grid; gap: 2px; min-width: 0; }
+.vmeta b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

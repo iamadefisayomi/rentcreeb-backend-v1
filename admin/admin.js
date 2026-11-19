@@ -83,6 +83,49 @@
     }).catch(function (e) { toast(e.message, true); });
   }
 
+  /** Multipart upload (POST /uploads?folder=…) with the admin's token. Resolves to the first stored file. */
+  function uploadFile(folder, file, retried) {
+    var fd = new FormData(); fd.append('files', file, file.name);
+    return fetch(API + '/uploads?folder=' + encodeURIComponent(folder), { method: 'POST', headers: { Authorization: 'Bearer ' + session.access_token }, body: fd }).then(function (res) {
+      if (res.status === 401 && !retried) return refreshSession().then(function () { return uploadFile(folder, file, true); });
+      return res.json().catch(function () { return {}; }).then(function (j) {
+        if (!res.ok) throw new Error((j.error && j.error.message) || ('Upload failed (' + res.status + ')'));
+        return j.files[0];
+      });
+    });
+  }
+  /** Full-screen photo viewer. */
+  function lightbox(url, caption) {
+    if (!safeUrl(url)) return;
+    var root = $('#modal-root');
+    root.innerHTML = '<div class="backdrop lightbox" role="dialog" aria-modal="true" aria-label="Photo"><img alt="" src="' + safeUrl(url) + '">' +
+      '<div class="lightbox-bar"><span>' + esc(caption || '') + '</span><a class="btn sm" target="_blank" rel="noopener" href="' + safeUrl(url) + '">Open original</a><button class="btn sm" id="lb-close">Close</button></div></div>';
+    var close = function () { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+    var onKey = function (e) { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    $('#lb-close').onclick = close;
+    $('.lightbox').onclick = function (e) { if (e.target.classList.contains('lightbox')) close(); };
+  }
+  /** Video tour cards for listing links; titles and thumbnails load from the host (cached by the API). */
+  var YT = /(?:youtube(?:-nocookie)?\.com\/(?:watch\?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/;
+  function videoCards(urls) {
+    return '<div class="video-cards">' + (urls || []).map(function (u) {
+      var yt = YT.exec(u); var thumb = yt ? 'https://i.ytimg.com/vi/' + yt[1] + '/hqdefault.jpg' : '';
+      return '<a class="video-card" target="_blank" rel="noopener" href="' + safeUrl(u) + '" data-vurl="' + esc(u) + '"><div class="vthumb"' + (thumb ? ' style="background-image:url(' + esc(thumb) + ')"' : '') + '><span class="play">\u25B6</span></div>' +
+        '<div class="vmeta"><b class="vtitle">' + esc(u.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)) + '</b><span class="faint vprov">Video link</span></div></a>';
+    }).join('') + '</div>';
+  }
+  function fillVideoCards() {
+    $$('[data-vurl]').forEach(function (el) {
+      api('/properties/video-preview' + qs({ url: el.dataset.vurl })).then(function (j) {
+        var p = j.preview; if (!p) return;
+        if (p.thumbnail && safeUrl(p.thumbnail)) $('.vthumb', el).style.backgroundImage = 'url("' + p.thumbnail.replace(/"/g, '') + '")';
+        $('.vtitle', el).textContent = p.title || p.url.replace(/^https?:\/\/(www\.)?/, '');
+        $('.vprov', el).textContent = p.providerName + (p.author ? ' \u00b7 ' + p.author : '');
+      }).catch(function () {});
+    });
+  }
+
   // ───────── dialogs ─────────
   /**
    * form({ title, body, fields: [{ name, label, type: text|textarea|select|checkbox|number|money|date|checks, options, value, required, min, placeholder, hint }],
@@ -655,6 +698,7 @@
         (p.rejection_reason ? '<div class="alert warn">Reason given: ' + esc(p.rejection_reason) + '</div>' : '') +
         aiPanel(p.ai_review, p) +
         section('Photos & videos (' + (p.property_media || []).length + ')', media ? '<div class="gallery">' + media + '</div>' : '<div class="faint">No media</div>') +
+        ((p.video_urls || []).length ? section('Video tour links (' + p.video_urls.length + ')', videoCards(p.video_urls) + '<div class="faint">Check the video shows this property before approving.</div>') : '') +
         '<div class="grid cols-2">' + section('Details', kv([['Price', '<b>' + naira(p.price_kobo) + '</b> / ' + esc(p.price_period)], ['Type', label(p.property_type)], ['Bedrooms', esc(p.bedrooms)], ['Bathrooms', esc(p.bathrooms)],
           ['Size', p.size_sqm ? esc(p.size_sqm) + ' m²' : ''], ['Inspection fee', p.inspection_fee_kobo != null ? naira(p.inspection_fee_kobo) : ''], ['Caution fee', p.caution_fee_kobo != null ? naira(p.caution_fee_kobo) : ''], ['Agency fee', p.agency_fee_kobo != null ? naira(p.agency_fee_kobo) : ''],
           ['Amenities', (p.amenities || []).map(function (a) { return badge(a, 'grey'); }).join(' ')], ['Security', (p.security_features || []).map(function (a) { return badge(a, 'grey'); }).join(' ')], ['Title document', esc(p.title_document || '')], ['Landmark', esc(p.landmark || '')],
@@ -665,7 +709,7 @@
         section('Reviews', table(['Rating', 'By', 'Comment'], j.reviews, function (x) { return '<tr><td>' + '★'.repeat(x.rating) + (x.hidden ? ' ' + badge('hidden', 'grey') : '') + '</td><td>' + name(x.reviewer) + '</td><td class="faint">' + esc(String(x.comment || '').slice(0, 120)) + '</td></tr>'; }, 'No reviews')) + '</div>' +
         (j.tenancies.length ? section('Tenancies', table(['Tenant', 'Status', 'Rent', 'Lease'], j.tenancies, function (t) { return '<tr class="click" data-go="#/tenancies/' + esc(t.id) + '"><td>' + name(t.tenant) + '</td><td>' + statusBadge(t.status) + '</td><td class="num">' + naira(t.rent_kobo) + ' ' + label(t.frequency) + '</td><td class="num">' + day(t.lease_start) + ' – ' + day(t.lease_end) + '</td></tr>'; })) : '') +
         notesBlock('property', p.id, j.notes) + '</div>');
-      bindListingActions(); bindGo(); bindNotes();
+      bindListingActions(); fillVideoCards(); bindGo(); bindNotes();
       on('p-status', function () {
         form({ title: 'Change listing status', fields: [{ name: 'status', label: 'Status', type: 'select', value: p.status, options: [['approved', 'Live (approved)'], ['pending', 'Awaiting approval'], ['unlisted', 'Unlisted'], ['rented', 'Rented'], ['rejected', 'Rejected / removed'], ['archived', 'Archived']] },
           { name: 'reason', label: 'Reason (sent to the owner)', type: 'textarea' }, { name: 'notifyOwner', label: 'Notify the owner', type: 'checkbox', value: true }], confirm: 'Save' })
@@ -805,7 +849,15 @@
 
   function ticketPage(id) {
     shell('support', 'Support request', '');
-    var last = null; var draft = '';
+    var last = null; var draft = ''; var pending = null; var pendingUrl = null;
+    var showChip = function () {
+      var c = $('#reply-chip'); if (!c) return;
+      if (pendingUrl) { URL.revokeObjectURL(pendingUrl); pendingUrl = null; }
+      if (!pending) { c.innerHTML = ''; return; }
+      var isImg = /^image\//.test(pending.type); if (isImg) pendingUrl = URL.createObjectURL(pending);
+      c.innerHTML = '<div class="file-chip">' + (isImg ? '<img alt="" src="' + pendingUrl + '">' : '<span class="fi">PDF</span>') + '<div><b>' + esc(pending.name) + '</b><div class="faint">' + Math.max(1, Math.round(pending.size / 1024)) + ' KB \u00b7 sent with your reply</div></div><button type="button" class="btn sm" id="chip-x" aria-label="Remove attachment">\u2715</button></div>';
+      on('chip-x', function () { pending = null; showChip(); });
+    };
     var STATUS = [['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed']];
     function load(first) {
       return api('/admin/tickets/' + id).then(function (j) {
@@ -818,14 +870,15 @@
         var k = KIND[t.kind] || [t.kind, ''];
         var thread = j.messages.map(function (m) {
           if (m.system) return '<div class="msg system">' + esc(m.body) + '<div class="meta">' + when(m.created_at) + '</div></div>';
-          var att = m.attachment && safeUrl(m.attachment) ? (/^image\//.test(m.attachment_type || '') ? '<a target="_blank" rel="noopener" href="' + safeUrl(m.attachment) + '"><img class="att" alt="" src="' + safeUrl(m.attachment) + '"></a>' : '<div><a target="_blank" rel="noopener" href="' + safeUrl(m.attachment) + '">📎 ' + esc(m.attachment_name || 'Attachment') + '</a></div>') : '';
+          var att = m.attachment && safeUrl(m.attachment) ? (/^image\//.test(m.attachment_type || '') ? '<button type="button" class="att-btn" data-photo="' + safeUrl(m.attachment) + '" aria-label="View photo"><img class="att" alt="" loading="lazy" src="' + safeUrl(m.attachment) + '"></button>' : '<div><a target="_blank" rel="noopener" href="' + safeUrl(m.attachment) + '">📎 ' + esc(m.attachment_name || 'Attachment') + '</a></div>') : '';
           var who = m.staff ? (staff[m.sender_id] ? plainName(staff[m.sender_id]) : 'Support') + ' (support)' : plainName(u);
           return '<div class="msg' + (m.staff ? ' right' : '') + '">' + esc(m.body || '') + att + '<div class="meta">' + esc(who) + ' · ' + when(m.created_at) + (m.staff ? (m.read_at ? ' · seen' : ' · sent') : '') + '</div></div>';
         }).join('');
         var composer = j.closed
           ? '<div class="alert info">This conversation is closed. The user can no longer send messages here. <button class="btn sm" data-st="in_progress">Reopen</button></div>'
           : '<form class="stack" id="reply"><textarea class="input" id="reply-body" placeholder="Reply to ' + esc(plainName(u) || 'the user') + '… (Ctrl+Enter to send)" style="min-height:90px"></textarea>' +
-            '<div class="row between"><span class="faint">Arrives in their Messages, as a push notification and by email.</span><div class="row">' +
+            '<div id="reply-chip"></div><input type="file" id="reply-file" accept="image/jpeg,image/png,image/webp,application/pdf" hidden>' +
+            '<div class="row between"><div class="row"><button type="button" class="btn" id="reply-attach">\uD83D\uDCCE Photo or file</button><span class="faint">Arrives in their Messages, as a push and by email.</span></div><div class="row">' +
             '<button type="button" class="btn" id="reply-resolve">Send &amp; resolve</button><button type="button" class="btn ghost-danger" id="reply-close">Send &amp; close</button><button class="btn primary">Send reply</button></div></div></form>';
         view('<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/support">← All requests</a></div><div class="grid ticket-grid">' +
           '<div class="card stack"><div class="row between"><div class="row">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity + ' severity', t.severity === 'high' ? 'bad' : 'grey') : '') + '<h2>' + esc(t.subject) + '</h2></div>' + statusBadge(t.status) + '</div>' +
@@ -841,16 +894,31 @@
           notesBlock('ticket', t.id, j.notes) + '</div></div>');
         var th = $('#thread'); if (th) th.scrollTop = th.scrollHeight;
         var rb = $('#reply-body'); if (rb) { rb.value = draft; if (first) rb.focus(); }
-        bindGo(); bindNotes();
+        bindGo(); bindNotes(); showChip();
+        $$('[data-photo]').forEach(function (b) { b.onclick = function () { lightbox(b.dataset.photo, plainName(u)); }; });
+        var fi = $('#reply-file'); if (fi) {
+          on('reply-attach', function () { fi.click(); });
+          fi.onchange = function () {
+            var f = fi.files && fi.files[0]; fi.value = ''; if (!f) return;
+            if (f.size > 25 * 1024 * 1024) { toast('That file is larger than 25 MB', true); return; }
+            if (!/^(image\/(jpeg|png|webp)|application\/pdf)$/.test(f.type)) { toast('Send a JPG, PNG, WebP or PDF', true); return; }
+            pending = f; showChip();
+          };
+          // Paste a screenshot straight into the reply box.
+          rb.onpaste = function (e) { var it = [].slice.call((e.clipboardData || {}).items || []).filter(function (x) { return /^image\//.test(x.type); })[0]; if (it) { var f = it.getAsFile(); if (f) { pending = new File([f], 'screenshot-' + Date.now() + '.png', { type: f.type }); showChip(); e.preventDefault(); } } };
+        }
         bind('[data-st]', function (st) {
           var go = function () { act(api('/admin/tickets/' + id, { method: 'PATCH', body: { status: st } }), st === 'closed' ? 'Closed: the user can no longer reply' : 'Status updated'); };
           if (st === 'closed') form({ title: 'Close this conversation?', body: 'The user’s chat is locked straight away and they can’t send more messages on this request.', confirm: 'Close', danger: true }).then(function (v) { if (v) go(); });
           else go();
         });
         var send = function (status) {
-          var body = ($('#reply-body').value || '').trim(); if (!body) { toast('Write a reply first', true); return; }
+          var body = ($('#reply-body').value || '').trim(); if (!body && !pending) { toast('Write a reply or attach a photo', true); return; }
           $$('#reply button').forEach(function (b) { b.disabled = true; });
-          post('/admin/tickets/' + id + '/messages', { body: body, status: status }).then(function () { draft = ''; $('#reply-body').value = ''; toast(status === 'closed' ? 'Sent and closed' : status === 'resolved' ? 'Sent and resolved' : 'Reply sent'); last = null; return load(); })
+          var file = pending;
+          (file ? uploadFile('chat-files', file).then(function (up) { return { path: up.path, name: up.name || file.name, type: up.mime || file.type, size: up.size || file.size }; }) : Promise.resolve(undefined))
+            .then(function (attachment) { return post('/admin/tickets/' + id + '/messages', { body: body, status: status, attachment: attachment }); })
+            .then(function () { pending = null; showChip(); }).then(function () { draft = ''; $('#reply-body').value = ''; toast(status === 'closed' ? 'Sent and closed' : status === 'resolved' ? 'Sent and resolved' : 'Reply sent'); last = null; return load(); })
             .catch(function (e) { toast(e.message, true); $$('#reply button').forEach(function (b) { b.disabled = false; }); });
         };
         var f = $('#reply'); if (f) {

@@ -50,7 +50,7 @@ export function createApp() {
   // Own CSP: scripts/styles only from here; images from https (listing photos, avatars, evidence on the CDN).
   app.use('/admin', helmet({
     contentSecurityPolicy: { directives: {
-      defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https:'],
+      defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'blob:', 'https:'], // blob: = preview of a photo before it is sent
       connectSrc: ["'self'"], frameAncestors: ["'none'"], formAction: ["'self'"], objectSrc: ["'none'"], baseUri: ["'self'"],
     } },
     referrerPolicy: { policy: 'no-referrer' },

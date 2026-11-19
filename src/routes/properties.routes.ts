@@ -1,3 +1,4 @@
+import { parseVideoLink, videoPreview } from '../lib/videoLinks';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, dbError, unwrap } from '../lib/supabase';
@@ -46,6 +47,17 @@ const propertyBody = z.object({
   /** Land: title document and number of plots. Commercial: intended use. */
   titleDocument: z.string().trim().max(80).optional(), plotCount: z.number().positive().max(10000).optional(), commercialUse: z.string().trim().max(80).optional(),
   media: z.array(mediaItem).max(30).default([]),
+  /** Video tour links (YouTube, Vimeo, TikTok, Instagram, Facebook, Loom…), stored in canonical form. */
+  videoUrls: z.array(z.string().trim().max(500)).max(5).optional().transform((list, ctx) => {
+    if (!list) return undefined;
+    const out: string[] = [];
+    for (const raw of list.filter(Boolean)) {
+      const v = parseVideoLink(raw);
+      if (!v) { ctx.addIssue({ code: z.ZodIssueCode.custom, message: `"${raw.slice(0, 60)}" is not a supported video link (YouTube, Vimeo, TikTok, Instagram, Facebook, Loom, Dailymotion or Streamable)` }); return z.NEVER; }
+      if (!out.includes(v.url)) out.push(v.url);
+    }
+    return out;
+  }),
   /** false = private/managed property (landlord tools only), never shown in search */
   publish: z.boolean().default(true),
   /** Landlord multi-unit setup (Figma "Add Property & Tenant Setup"). Omitted → one unit from bedrooms/price. */
@@ -82,7 +94,12 @@ const row = (b: z.infer<typeof propertyBody>) => ({
   parking_spaces: b.parkingSpaces, year_built: b.yearBuilt, landmark: b.landmark,
   caution_fee_kobo: b.cautionFeeKobo, agency_fee_kobo: b.agencyFeeKobo, security_features: b.securityFeatures,
   title_document: b.titleDocument, plot_count: b.plotCount, commercial_use: b.commercialUse,
+  video_urls: b.videoUrls,
 });
+
+/** A column the code writes is missing (migration not applied yet). */
+const missingColumn = (e: { code?: string; message?: string } | null) => !!e && (e.code === 'PGRST204' || e.code === '42703');
+const VIDEO_MIGRATION = 'Video links need a database update (migration 019). Remove the video links for now, or ask the RentCreeb team.';
 
 async function assertOwner(propertyId: string, userId: string) {
   const { data } = await db.from('properties').select('*').eq('id', propertyId).maybeSingle();
@@ -272,7 +289,11 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
   const b = (req.body?.publish === false ? draftBody : propertyBody).parse(req.body);
   if (b.publish) await assertCanList(req.user);
   if (b.units) assertUniqueLabels(b.units);
-  const p = unwrap(await db.from('properties').insert({ ...row(b), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single());
+  const ins = await db.from('properties').insert({ ...row(b), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single();
+  if (missingColumn(ins.error) && b.videoUrls?.length) throw badRequest(VIDEO_MIGRATION, 'MIGRATION_REQUIRED');
+  const p = unwrap(missingColumn(ins.error)
+    ? await db.from('properties').insert({ ...row({ ...b, videoUrls: undefined }), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single()
+    : ins);
   if (b.media.length)
     await db.from('property_media').insert(b.media.map((m, i) => ({ property_id: p.id, url: m.url, media_type: m.type, position: i })));
   const units: UnitInput[] = b.units?.length ? b.units : [{
@@ -282,6 +303,15 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
   const created = unwrap(await db.from('units').insert(units.map((u) => ({ ...unitRow(u), property_id: p.id }))).select());
   if (p.status === 'pending') queueListingReview(p.id); // checked in the background; the lister follows it on GET /:id/review
   res.status(201).json({ property: p, units: created, message: b.publish ? 'Submitted for approval' : 'Property saved' });
+});
+
+/** Title and thumbnail for a video tour link (used while adding links and on the listing page). */
+r.get('/video-preview', async (req, res) => {
+  const { url } = z.object({ url: z.string().trim().min(8).max(500) }).parse(req.query);
+  const preview = await videoPreview(url);
+  if (!preview) throw badRequest('Use a YouTube, Vimeo, TikTok, Instagram, Facebook, Loom, Dailymotion or Streamable link', 'UNSUPPORTED_VIDEO');
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json({ preview });
 });
 
 // ── Detail ──
@@ -411,7 +441,10 @@ r.patch('/:id', authenticate, requireRole(...LISTER_ROLES), async (req, res) => 
   const patch: Record<string, unknown> = Object.fromEntries(Object.entries(row(b as any)).filter(([, v]) => v !== undefined));
   patch.updated_at = new Date().toISOString();
   if (existing.status === 'rejected') { patch.status = 'pending'; patch.rejection_reason = null; } // edit & resubmit
-  const saved = unwrap(await db.from('properties').update(patch).eq('id', existing.id).select().single());
+  const upd = await db.from('properties').update(patch).eq('id', existing.id).select().single();
+  if (missingColumn(upd.error) && (b as any).videoUrls?.length) throw badRequest(VIDEO_MIGRATION, 'MIGRATION_REQUIRED');
+  if (missingColumn(upd.error)) delete patch.video_urls;
+  const saved = unwrap(missingColumn(upd.error) ? await db.from('properties').update(patch).eq('id', existing.id).select().single() : upd);
   if (saved.status === 'pending') queueListingReview(saved.id);
   res.json({ property: saved });
 });
