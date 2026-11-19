@@ -377,7 +377,48 @@
   }
   var PAGES = {};
   var pageTimer = null; // per-page polling (support thread, sending campaign); cleared on every navigation
-  function stopPage() { if (pageTimer) { clearInterval(pageTimer); pageTimer = null; } }
+  var pageStream = null; // live updates for the current page (server-sent events); closed on every navigation
+  function stopPage() { if (pageTimer) { clearInterval(pageTimer); pageTimer = null; } if (pageStream) { pageStream.close(); pageStream = null; } }
+
+  /**
+   * Server-sent events from GET /admin/live, read with fetch so the token goes in a header. Reconnects by itself
+   * (with a fresh token after a 401) until close() is called. onEvent(type, data); onState(true|false) for the "live" dot.
+   */
+  function liveStream(params, onEvent, onState) {
+    var closed = false; var ctrl = null; var retry = 1000;
+    var setState = function (s) { if (onState) onState(s); };
+    var connect = function () {
+      if (closed) return;
+      ctrl = new AbortController();
+      fetch(API + '/admin/live' + qs(params), { headers: { Authorization: 'Bearer ' + session.access_token, Accept: 'text/event-stream' }, signal: ctrl.signal }).then(function (res) {
+        if (res.status === 401) return refreshSession().then(function () { throw new Error('reauth'); });
+        if (!res.ok || !res.body) throw new Error('live ' + res.status);
+        setState(true); retry = 1000;
+        var reader = res.body.getReader(); var dec = new TextDecoder(); var buf = '';
+        var pump = function () {
+          return reader.read().then(function (r) {
+            if (r.done) throw new Error('ended');
+            buf += dec.decode(r.value, { stream: true });
+            var parts = buf.split('\n\n'); buf = parts.pop();
+            parts.forEach(function (chunk) {
+              var ev = 'message', data = '';
+              chunk.split('\n').forEach(function (ln) { if (ln.indexOf('event:') === 0) ev = ln.slice(6).trim(); else if (ln.indexOf('data:') === 0) data += ln.slice(5).trim(); });
+              if (!data) return;
+              try { onEvent(ev, JSON.parse(data)); } catch (e) { /* ignore a bad event */ }
+            });
+            return pump();
+          });
+        };
+        return pump();
+      }).catch(function () {
+        setState(false);
+        if (closed) return;
+        setTimeout(connect, retry); retry = Math.min(retry * 2, 20000);
+      });
+    };
+    connect();
+    return { close: function () { closed = true; if (ctrl) ctrl.abort(); } };
+  }
   function route() {
     $('#modal-root').innerHTML = ''; // never carry a dialog over to another page
     stopLive(); stopPage();
@@ -837,7 +878,7 @@
     var filt = '<form class="row" id="tfilter" style="margin-bottom:12px"><input class="input" name="q" placeholder="Search subject or message" value="' + esc(r.q.q || '') + '"><select class="input" name="kind"><option value="">All kinds</option>' +
       [['support', 'Support'], ['bug', 'Bug reports'], ['data_request', 'Data requests']].map(function (x) { return '<option value="' + x[0] + '"' + (r.q.kind === x[0] ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select><button class="btn">Filter</button></form>';
     var query = tab === 'awaiting' ? { awaiting: 'staff' } : tab === 'mine' ? { assigned: 'me' } : tab === 'unassigned' ? { assigned: 'none' } : tab === 'all' ? {} : { status: tab };
-    api('/admin/tickets' + qs(Object.assign(query, { kind: r.q.kind, q: r.q.q, page: page, limit: PAGE }))).then(function (j) {
+    var fetchList = function () { return api('/admin/tickets' + qs(Object.assign({}, query, { kind: r.q.kind, q: r.q.q, page: page, limit: PAGE }))).then(function (j) {
       var list = j.tickets || [];
       view(tabs([['awaiting', 'Needs a reply'], ['mine', 'Assigned to me'], ['unassigned', 'Unassigned'], ['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']], tab, function (t) { return '/support' + qs({ tab: t, kind: r.q.kind }); }) + filt +
         (list.length ? '<div class="card">' + table(['', 'Request', 'From', 'Status', 'Last activity'], list, function (t) {
@@ -848,12 +889,30 @@
         }) + '</div>' : '<div class="card empty">' + (tab === 'awaiting' ? 'All caught up: nobody is waiting for a reply.' : 'No tickets here.') + '</div>') + pager(page, j.total, r.raw));
       $('#tfilter').onsubmit = function (e) { e.preventDefault(); location.hash = '#/support' + qs({ tab: tab, q: e.target.q.value.trim(), kind: e.target.kind.value }); };
       bindGo();
-    }).catch(fail);
+    }).catch(fail); };
+    fetchList();
+    // New requests and replies appear on their own (debounced; never while you're typing in the filter).
+    var soon = null;
+    pageStream = liveStream({ inbox: '1' }, function (type) {
+      if (type !== 'ticket') return;
+      clearTimeout(soon);
+      soon = setTimeout(function () { var a = document.activeElement; if (!a || !a.closest || !a.closest('#tfilter')) fetchList(); }, 400);
+    });
   };
 
   function ticketPage(id) {
     shell('support', 'Support request', '');
     var last = null; var draft = ''; var pending = null; var pendingUrl = null;
+    var userTyping = false; var typingOff = null; var userId = null; var liveOn = false;
+    var paintTyping = function () { var el = $('#typing-ind'); if (el) el.hidden = !userTyping; var d = $('#live-dot'); if (d) { d.className = 'live-dot' + (liveOn ? ' on' : ''); d.title = liveOn ? 'Live: new messages appear instantly' : 'Reconnecting…'; } };
+    // Tell the user "Support is typing…" (throttled; stops after a pause or when the reply is sent).
+    var myTyping = false; var lastPing = 0; var idle = null;
+    var pingTyping = function (on) {
+      clearTimeout(idle);
+      if (on) { idle = setTimeout(function () { pingTyping(false); }, 4000); if (Date.now() - lastPing < 3000 && myTyping) return; lastPing = Date.now(); }
+      if (!on && !myTyping) return;
+      myTyping = on; post('/admin/tickets/' + id + '/typing', { typing: on }).catch(function () {});
+    };
     var showChip = function () {
       var c = $('#reply-chip'); if (!c) return;
       if (pendingUrl) { URL.revokeObjectURL(pendingUrl); pendingUrl = null; }
@@ -885,8 +944,9 @@
             '<div class="row between"><div class="row"><button type="button" class="btn" id="reply-attach">\uD83D\uDCCE Photo or file</button><span class="faint">Arrives in their Messages, as a push and by email.</span></div><div class="row">' +
             '<button type="button" class="btn" id="reply-resolve">Send &amp; resolve</button><button type="button" class="btn ghost-danger" id="reply-close">Send &amp; close</button><button class="btn primary">Send reply</button></div></div></form>';
         view('<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/support">← All requests</a></div><div class="grid ticket-grid">' +
-          '<div class="card stack"><div class="row between"><div class="row">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity + ' severity', t.severity === 'high' ? 'bad' : 'grey') : '') + '<h2>' + esc(t.subject) + '</h2></div>' + statusBadge(t.status) + '</div>' +
-          '<div class="msgs thread" id="thread">' + (thread || '<div class="empty">No messages yet.</div>') + '</div>' + composer + '</div>' +
+          '<div class="card stack"><div class="row between"><div class="row">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity + ' severity', t.severity === 'high' ? 'bad' : 'grey') : '') + '<h2>' + esc(t.subject) + '</h2></div><div class="row"><span id="live-dot" class="live-dot' + (liveOn ? ' on' : '') + '"></span>' + statusBadge(t.status) + '</div></div>' +
+          '<div class="msgs thread" id="thread">' + (thread || '<div class="empty">No messages yet.</div>') + '</div>' +
+          '<div class="typing-ind" id="typing-ind" hidden><span class="dots"><i></i><i></i><i></i></span>' + esc(u.first_name || 'They') + ' is typing\u2026</div>' + composer + '</div>' +
           '<div class="stack">' + section('Person', '<div class="row">' + avatar(u) + '<div>' + userLink(u) + '<div class="faint">' + label(u.role) + (u.is_suspended ? ' · suspended' : '') + '</div></div></div>' +
             kv([['Email', esc(u.email || '')], ['Phone', esc(u.phone || '')], ['Member since', day(u.created_at)]])) +
           section('Assigned to', '<div class="row between"><span>' + (t.assignee ? (t.assignee.id === me.id ? '<b>You</b>' : name(t.assignee)) : '<span class="faint">Nobody yet</span>') + '</span>' +
@@ -899,6 +959,7 @@
           (t.kind === 'data_request' ? section('Data request', '<p class="faint">Export or erase their data from the account page.</p><a class="btn" href="#/users/' + esc(u.id) + '">Open account</a>') : '') +
           ((j.otherTickets || []).length ? section('Their other requests', table(['Subject', 'Status'], j.otherTickets, function (o) { return '<tr class="click" data-go="#/support/' + esc(o.id) + '"><td>' + esc(o.subject) + '<div class="faint">' + ago(o.created_at) + '</div></td><td>' + statusBadge(o.status) + '</td></tr>'; })) : '') +
           notesBlock('ticket', t.id, j.notes) + '</div></div>');
+        userId = u.id; paintTyping();
         var th = $('#thread'); if (th) th.scrollTop = th.scrollHeight;
         var rb = $('#reply-body'); if (rb) { rb.value = draft; if (first) rb.focus(); }
         bindGo(); bindNotes(); showChip();
@@ -924,6 +985,7 @@
         });
         var send = function (status) {
           var body = ($('#reply-body').value || '').trim(); if (!body && !pending) { toast('Write a reply or attach a photo', true); return; }
+          pingTyping(false);
           $$('#reply button').forEach(function (b) { b.disabled = true; });
           var file = pending;
           (file ? uploadFile('chat-files', file).then(function (up) { return { path: up.path, name: up.name || file.name, type: up.mime || file.type, size: up.size || file.size }; }) : Promise.resolve(undefined))
@@ -934,6 +996,7 @@
         var f = $('#reply'); if (f) {
           f.onsubmit = function (e) { e.preventDefault(); send(); };
           rb.onkeydown = function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } };
+          rb.oninput = function () { pingTyping(!!rb.value.trim()); };
           on('reply-resolve', function () { send('resolved'); });
           on('reply-close', function () { form({ title: 'Send and close?', body: 'The user’s chat locks right after your reply.', confirm: 'Send & close', danger: true }).then(function (v) { if (v) send('closed'); }); });
         }
@@ -941,7 +1004,16 @@
     }
     load(true).catch(fail);
     // New messages from the user show up without a reload.
-    pageTimer = setInterval(function () { if (document.visibilityState === 'visible' && !$('#modal-root').innerHTML) load().catch(function () {}); }, 5000);
+    var soon = null;
+    var refresh = function () { clearTimeout(soon); soon = setTimeout(function () { if (!$('#modal-root').innerHTML) load().catch(function () {}); }, 120); };
+    pageStream = liveStream({ ticketId: id }, function (type, e) {
+      if (type === 'message') { if (e.op === 'insert') { userTyping = false; paintTyping(); } refresh(); }
+      else if (type === 'typing' && e.userId === userId) {
+        userTyping = !!e.on; paintTyping();
+        clearTimeout(typingOff); if (userTyping) typingOff = setTimeout(function () { userTyping = false; paintTyping(); }, 7000);
+      }
+    }, function (on) { liveOn = on; paintTyping(); if (on) refresh(); });
+    pageTimer = setInterval(function () { if (document.visibilityState === 'visible' && !$('#modal-root').innerHTML) load().catch(function () {}); }, liveOn ? 60000 : 30000);
   }
 
   // ═════════ Feedback ═════════

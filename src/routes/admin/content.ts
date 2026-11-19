@@ -7,6 +7,8 @@ import { paginate, uuid } from '../../lib/common';
 import { notify } from '../../services/notify';
 import { PERSON, audit, count, decision, like, notesFor } from './shared';
 import { ensureTicketConversation, postStaffReply, setTicketStatus, type Ticket } from '../../services/supportChat';
+import { broadcastTyping, watchConversation, watchTickets } from '../../services/liveHub';
+import { setTyping } from '../../services/presence';
 import { liveListingReviews, queueListingReview, reviewListing } from '../../services/listingReview';
 
 /** Run a query with the private AI review embedded; without it if migration 015 isn't applied yet. */
@@ -234,6 +236,42 @@ export function mountContent(r: Router) {
     if (error) throw dbError(error);
     res.json({ tickets: data, total: total ?? 0 });
   });
+  /**
+   * Live updates as server-sent events (the dashboard reads them with fetch, so the admin token stays in a header).
+   * ?ticketId=… → new messages, read receipts and the user typing in that ticket's chat; ?inbox=1 → any ticket change.
+   * Streams end after 15 minutes so the token is re-checked; the dashboard reconnects on its own.
+   */
+  r.get('/live', async (req, res) => {
+    const f = z.object({ ticketId: uuid.optional(), inbox: z.enum(['1']).optional() }).parse(req.query);
+    if (!f.ticketId && !f.inbox) throw badRequest('Say what to watch');
+    let conversationId: string | null = null; let userId: string | null = null;
+    if (f.ticketId) {
+      const t = unwrapMaybe(await db.from('support_tickets').select('*').eq('id', f.ticketId).maybeSingle()) as Ticket | null;
+      if (!t) throw notFound('Ticket not found');
+      conversationId = await ensureTicketConversation(t); userId = t.user_id;
+    }
+    res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    const send = (event: string, data: unknown) => { if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+    const offs: (() => void)[] = [];
+    if (conversationId && userId) offs.push(watchConversation(conversationId, userId, (e) => send(e.type, e)));
+    if (f.inbox) offs.push(watchTickets((e) => send('ticket', e)));
+    send('ready', { conversationId });
+    const ping = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 25_000); // keeps proxies from closing an idle stream
+    const max = setTimeout(() => res.end(), 15 * 60_000);
+    req.on('close', () => { clearInterval(ping); clearTimeout(max); offs.forEach((off) => off()); });
+  });
+  /** The admin is typing a reply: shown live in the user's chat header. */
+  r.post('/tickets/:id/typing', async (req, res) => {
+    const { typing } = z.object({ typing: z.boolean() }).parse(req.body ?? {});
+    const { data: t } = await db.from('support_tickets').select('conversation_id').eq('id', uuid.parse(req.params.id)).maybeSingle();
+    if (t?.conversation_id) {
+      setTyping(t.conversation_id, 'support', typing); // HTTP fallback the app polls
+      await broadcastTyping(t.conversation_id, req.user.id, typing); // instant, over Realtime
+    }
+    res.status(204).end();
+  });
+
   /** One ticket with its chat thread (support threads are part of the job, so opening one is not audited like private chats). */
   r.get('/tickets/:id', async (req, res) => {
     const id = uuid.parse(req.params.id);

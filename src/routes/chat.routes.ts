@@ -179,7 +179,7 @@ r.post('/:id/typing', async (req, res) => {
 r.get('/:id/activity', async (req, res) => {
   const c = await getConv(req.params.id, req.user.id);
   const otherId = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
-  if (!otherId) return res.json({ visible: false, typing: false, inCall: false, online: false, lastSeenAt: null });
+  if (c.context_type === 'support' || !otherId) return res.json({ visible: true, typing: isTyping(c.id, 'support'), inCall: false, online: false, lastSeenAt: null });
   const { data: other } = await db.from('profiles').select('privacy_prefs').eq('id', otherId).maybeSingle();
   if (!showsActivity(other?.privacy_prefs) || !showsActivity((req.user as any).privacy_prefs)) {
     return res.json({ visible: false, typing: false, inCall: false, online: false, lastSeenAt: null });

@@ -440,3 +440,13 @@ iframe.preview.tall { height: 70vh; }
 .avail.on .sw { background: #22c55e; }
 .avail.on .sw::after { transform: translateX(13px); }
 .nav .badge.mine { background: #22c55e; }
+
+/* Live support: typing indicator + connection dot */
+.typing-ind { display: flex; align-items: center; gap: 8px; color: var(--soft); font-size: 12.5px; padding: 0 4px; }
+.typing-ind[hidden] { display: none; }
+.typing-ind .dots { display: inline-flex; gap: 3px; }
+.typing-ind .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); animation: blink 1.2s infinite ease-in-out; }
+.typing-ind .dots i:nth-child(2) { animation-delay: .15s; } .typing-ind .dots i:nth-child(3) { animation-delay: .3s; }
+@keyframes blink { 0%, 80%, 100% { opacity: .3; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); display: inline-block; }
+.live-dot.on { background: var(--success); box-shadow: 0 0 0 3px var(--success-tint); }
