@@ -31,7 +31,9 @@ async function insertVerification(row: Record<string, unknown>) {
   const { data, error } = await db.from('verifications').insert(row).select('id').single();
   if (!error) return data;
   if (/nimc_record|nimc_files|column/i.test(error.message) && ('nimc_record' in row || 'nimc_files' in row)) {
-    const { nimc_record: _r, nimc_files: _f, ...rest } = row; // migration 017 not applied yet
+    // Migration 017 not applied: the NIMC card and NIN response are LOST for this check. Saved anyway without them.
+    logger.error({ err: error.message }, 'NIMC card/response NOT saved: run backend/supabase/migrations/017_nimc_response.sql in Supabase');
+    const { nimc_record: _r, nimc_files: _f, ...rest } = row;
     return insertVerification(rest);
   }
   if (/selfie_path|document_path|document_type|column/i.test(error.message)) {

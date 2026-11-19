@@ -63,7 +63,8 @@ export async function checkBytidCredentials() {
 
 /**
  * Bytid NIN + selfie face match.
- * Docs: https://www.bytid.com/docs  (POST /v1/identity/nin/face-match  { id_number, selfie_image(base64) })
+ * Docs: https://www.bytid.com/docs  (POST /v1/identity/nin/face-match  { id_number, selfie_image(base64), include_photo })
+ * With include_photo the NIMC ID photo comes back as base64 in data.photo (picked up by splitImages).
  * A check that ran always returns HTTP 200 — the outcome is in data.status (verified | not_found | failed)
  * and data.face_match.status (matched | not_matched | unavailable), score 0–100.
  * Sandbox (uvk_test_ key): NIN ending 00 → not_found, 99 → failed, 98 → face not_matched, anything else → matched.
@@ -74,7 +75,8 @@ export async function verifyNinWithSelfie(nin: string, selfieBase64: string): Pr
     res = await fetch(`${env.BYTID_BASE_URL}/identity/nin/face-match`, {
       method: 'POST',
       headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id_number: nin, selfie_image: selfieBase64 }),
+      // include_photo: Bytid only returns the NIMC ID photo (base64, in data.photo) when asked; it is kept for the admin page.
+      body: JSON.stringify({ id_number: nin, selfie_image: selfieBase64, include_photo: true }),
       signal: AbortSignal.timeout(45_000),
     });
   } catch {
