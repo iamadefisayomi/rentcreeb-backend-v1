@@ -6,6 +6,7 @@ import { sendEmail } from '../lib/email';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { authenticate } from '../middleware/auth';
+import { ensureTicketConversation } from '../services/supportChat';
 
 /** Settings → Support (Contact Support, Report a Bug, Rate RentCreeb) and Privacy / Cookie preferences. */
 const r = Router();
@@ -45,6 +46,8 @@ r.post('/tickets', async (req, res) => {
     user_id: req.user.id, kind: b.kind, category: b.category, subject: b.subject, message: b.message,
     severity: b.kind === 'bug' ? b.severity ?? 'medium' : null, meta: b.meta ?? {},
   }).select().single());
+  // The request opens as a chat thread in Messages, where support's answers arrive and the user can reply.
+  try { await ensureTicketConversation(ticket); } catch (err) { logger.error({ err, ticket: ticket.id }, 'support thread not created (apply migration 018)'); }
 
   if (env.SUPPORT_EMAIL) {
     const who = `${req.user.first_name ?? ''} ${req.user.last_name ?? ''}`.trim() || req.user.id;
@@ -59,7 +62,7 @@ r.post('/tickets', async (req, res) => {
 });
 
 r.get('/tickets', async (req, res) => {
-  const tickets = unwrap(await db.from('support_tickets').select('id, kind, category, subject, status, created_at')
+  const tickets = unwrap(await db.from('support_tickets').select('id, kind, category, subject, status, created_at, conversation_id, awaiting, last_message_at')
     .eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(20));
   res.json({ tickets });
 });

@@ -120,6 +120,7 @@ r.post('/', async (req, res) => {
   if (!conv) throw notFound('Conversation not found');
   if (![conv.participant_a, conv.participant_b].includes(req.user.id)) throw forbidden();
   const callee = conv.participant_a === req.user.id ? conv.participant_b : conv.participant_a;
+  if (conv.context_type === 'support' || !callee) throw badRequest('Calls are not available in this chat', 'CALL_UNAVAILABLE');
 
   // One call at a time per person: clear our own stale rings, then refuse if the other person is busy.
   const since = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();

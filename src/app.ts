@@ -33,6 +33,7 @@ import adminRoutes from './routes/admin.routes';
 import supportRoutes from './routes/support.routes';
 import documentsRoutes from './routes/documents.routes';
 import keepAliveRoutes from './routes/keep-alive.routes';
+import mailRoutes from './routes/mail.routes';
 
 export function createApp() {
   const app = express();
@@ -59,6 +60,8 @@ export function createApp() {
   const strict = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
 
   app.use('/webhooks', webhookRouter);
+  // Links inside emails (unsubscribe, tracking), the sign-up form and the Resend webhook. Own limits inside.
+  app.use('/mail', mailRoutes);
   // Before the rate limiter, so a scheduler's pings never get throttled.
   app.use('/api/v1/cron', keepAliveRoutes);
   app.use(general);

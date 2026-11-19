@@ -10,6 +10,7 @@ import { logger } from '../lib/logger';
 import { isTyping, presenceOf, setTyping } from '../services/presence';
 import { PRIVACY_DEFAULTS } from './support.routes';
 import { ensureConversation } from '../services/conversations';
+import { SUPPORT_PERSON, onUserSupportMessage } from '../services/supportChat';
 
 const r = Router();
 r.use(authenticate);
@@ -25,9 +26,11 @@ async function getConv(id: string, userId: string) {
 async function attachContext(out: { contextType: string; contextId: string }[]) {
   const bIds = out.filter((c) => c.contextType === 'booking').map((c) => c.contextId);
   const jIds = out.filter((c) => c.contextType === 'job').map((c) => c.contextId);
-  const [bks, jbs] = await Promise.all([
+  const sIds = out.filter((c) => c.contextType === 'support').map((c) => c.contextId);
+  const [bks, jbs, tks] = await Promise.all([
     bIds.length ? db.from('bookings').select('id, status, scheduled_at, properties(id, title, area, property_media(url, position))').in('id', bIds) : Promise.resolve({ data: [] as any[] }),
     jIds.length ? db.from('jobs').select('id, status, title, properties(id, title, area)').in('id', jIds) : Promise.resolve({ data: [] as any[] }),
+    sIds.length ? db.from('support_tickets').select('id, status, subject, category, created_at').in('id', sIds) : Promise.resolve({ data: [] as any[] }),
   ]);
   const ctx = new Map<string, any>();
   for (const x of (bks.data ?? []) as any[]) {
@@ -35,6 +38,7 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
     ctx.set(x.id, { id: x.id, kind: 'booking', status: x.status, title: x.properties?.title ?? 'Inspection', area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: x.scheduled_at, cover });
   }
   for (const x of (jbs.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'job', status: x.status, title: x.title, area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: null, cover: null, property: x.properties?.title ?? null });
+  for (const x of (tks.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'support', status: x.status, title: x.subject, area: x.category, propertyId: null, date: x.created_at, cover: null });
   for (const c of out as any[]) c.context = ctx.get(c.contextId) ?? null;
 }
 
@@ -46,7 +50,8 @@ r.get('/', async (req, res) => {
   const out = await Promise.all((convs ?? []).map(async (c: any) => {
     const { data: last } = await db.from('messages').select('*').eq('conversation_id', c.id).order('created_at', { ascending: false }).limit(1).maybeSingle();
     const { count } = await db.from('messages').select('id', { count: 'exact', head: true }).eq('conversation_id', c.id).neq('sender_id', req.user.id).is('read_at', null);
-    return { id: c.id, contextType: c.context_type, contextId: c.context_id, other: c.participant_a === req.user.id ? c.b : c.a, lastMessage: last, unreadCount: count ?? 0 };
+    const other = c.context_type === 'support' ? SUPPORT_PERSON : c.participant_a === req.user.id ? c.b : c.a;
+    return { id: c.id, contextType: c.context_type, contextId: c.context_id, other, closed: !!c.closed_at, lastMessage: last, unreadCount: count ?? 0 };
   }));
   await attachContext(out);
   out.sort((x, y) => (y.lastMessage?.created_at ?? '').localeCompare(x.lastMessage?.created_at ?? ''));
@@ -89,8 +94,9 @@ r.post('/open', async (req, res) => {
 r.get('/:id', async (req, res) => {
   const c: any = await getConv(String(req.params.id), req.user.id);
   const otherId = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
-  const { data: other } = await db.from('profiles').select('id, first_name, last_name, avatar_url, nin_verified, role').eq('id', otherId).maybeSingle();
-  const conv: any = { id: c.id, contextType: c.context_type, contextId: c.context_id, other };
+  const other = c.context_type === 'support' ? SUPPORT_PERSON
+    : (await db.from('profiles').select('id, first_name, last_name, avatar_url, nin_verified, role').eq('id', otherId).maybeSingle()).data;
+  const conv: any = { id: c.id, contextType: c.context_type, contextId: c.context_id, other, closed: !!c.closed_at };
   await attachContext([conv]);
   res.json({ conversation: conv });
 });
@@ -133,6 +139,7 @@ r.post('/:id/messages', async (req, res) => {
     }).optional(),
   }).parse(req.body);
   if (!b.body?.trim() && !b.attachmentUrl && !b.attachment) throw badRequest('Empty message');
+  if (c.closed_at) throw forbidden('This conversation has been closed. Start a new request from Contact Support.', 'CHAT_CLOSED');
   let quoted: { id: string; body: string | null; attachment_url: string | null; sender_id: string } | null = null;
   if (b.replyToId) {
     const { data } = await db.from('messages').select('id, body, attachment_url, sender_id, conversation_id').eq('id', b.replyToId).maybeSingle();
@@ -146,7 +153,8 @@ r.post('/:id/messages', async (req, res) => {
   setTyping(c.id, req.user.id, false);
   const other = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
   const preview = b.body?.trim() ? b.body.trim().slice(0, 100) : b.attachment ? attachmentLabel({ attachment_type: b.attachment.type, attachment_name: b.attachment.name }) : '📎 Attachment';
-  await notify(other, 'message', fullName(req.user) || 'New message', preview, { conversationId: c.id });
+  if (c.context_type === 'support') await onUserSupportMessage(c.context_id, b.body?.trim() || preview, req.user);
+  else if (other) await notify(other, 'message', fullName(req.user) || 'New message', preview, { conversationId: c.id });
   res.status(201).json({ message: msg });
 });
 
@@ -171,6 +179,7 @@ r.post('/:id/typing', async (req, res) => {
 r.get('/:id/activity', async (req, res) => {
   const c = await getConv(req.params.id, req.user.id);
   const otherId = c.participant_a === req.user.id ? c.participant_b : c.participant_a;
+  if (!otherId) return res.json({ visible: false, typing: false, inCall: false, online: false, lastSeenAt: null });
   const { data: other } = await db.from('profiles').select('privacy_prefs').eq('id', otherId).maybeSingle();
   if (!showsActivity(other?.privacy_prefs) || !showsActivity((req.user as any).privacy_prefs)) {
     return res.json({ visible: false, typing: false, inCall: false, online: false, lastSeenAt: null });

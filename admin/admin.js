@@ -28,7 +28,8 @@
     closed: 'grey', pending: 'warn', open: 'warn', investigating: 'warn', in_progress: 'warn', manual_review: 'warn', held: 'warn', pending_payment: 'warn', due: 'warn', ringing: 'warn',
     assigned: 'warn', diagnosing: 'warn', awaiting_approval: 'warn', awaiting_confirmation: 'warn', job_posted: 'warn',
     rejected: 'bad', failed: 'bad', overdue: 'bad', declined: 'bad', reversed: 'bad', cancelled: 'grey', dismissed: 'grey', refunded: 'grey', unlisted: 'grey', paused: 'grey',
-    archived: 'grey', expired: 'grey', ended: 'grey', draft: 'grey' };
+    archived: 'grey', expired: 'grey', ended: 'grey', draft: 'grey',
+    subscribed: 'ok', sent: 'ok', delivered: 'ok', sending: 'warn', scheduled: 'warn', queued: 'warn', unsubscribed: 'grey', skipped: 'grey', bounced: 'bad', complained: 'bad' };
   function statusBadge(s) { return badge(String(s || '—').replace(/_/g, ' '), TONE[s]); }
   function label(s) { return esc(String(s || '—').replace(/_/g, ' ')); }
   function qs(o) { var p = []; Object.keys(o).forEach(function (k) { if (o[k] !== undefined && o[k] !== null && o[k] !== '') p.push(encodeURIComponent(k) + '=' + encodeURIComponent(o[k])); }); return p.length ? '?' + p.join('&') : ''; }
@@ -151,6 +152,7 @@
     ['People', [['users', 'Users']]],
     ['Money', [['finance', 'Finance'], ['payments', 'Payments', 'stuckPayments'], ['bookings', 'Bookings'], ['escrow', 'Escrow'], ['withdrawals', 'Withdrawals', 'pendingWithdrawals'], ['subscriptions', 'Subscriptions & plans']]],
     ['Operations', [['tenancies', 'Tenancies'], ['jobs', 'Jobs'], ['rentsave', 'RentSave']]],
+    ['Mailing', [['mailing', 'Overview'], ['mail-campaigns', 'Campaigns'], ['mail-automations', 'Automations'], ['mail-contacts', 'Contacts'], ['mail-lists', 'Lists & sign-up form'], ['mail-templates', 'Templates']]],
     ['Platform', [['announcements', 'Announcements'], ['audit', 'Audit log']]],
   ];
   var ALL_NAV = []; NAV.forEach(function (g) { ALL_NAV = ALL_NAV.concat(g[1]); });
@@ -254,9 +256,11 @@
     return { path: path, q: q, raw: h };
   }
   var PAGES = {};
+  var pageTimer = null; // per-page polling (support thread, sending campaign); cleared on every navigation
+  function stopPage() { if (pageTimer) { clearInterval(pageTimer); pageTimer = null; } }
   function route() {
     $('#modal-root').innerHTML = ''; // never carry a dialog over to another page
-    stopLive();
+    stopLive(); stopPage();
     if (!session) return renderLogin();
     if (!me) return api('/users/me').then(function (r) {
       var p = r.profile || r.user || r;
@@ -697,31 +701,91 @@
   };
 
   // ═════════ Support ═════════
+  // Every ticket is a chat thread in the user's Messages. Replies land there instantly; closing locks the thread.
+  var KIND = { support: ['Support', ''], bug: ['Bug', 'warn'], data_request: ['Data request', 'bad'] };
   PAGES.support = function (r) {
-    var tab = r.q.tab || 'open'; var page = Number(r.q.page || 1);
-    shell('support', 'Support tickets', 'Contact Support, bug reports and data requests from the app.');
+    if (r.path[1]) return ticketPage(r.path[1]);
+    var tab = r.q.tab || 'awaiting'; var page = Number(r.q.page || 1);
+    shell('support', 'Support', 'Requests, bug reports and data requests. Each one is a conversation in the user’s Messages.');
     var filt = '<form class="row" id="tfilter" style="margin-bottom:12px"><input class="input" name="q" placeholder="Search subject or message" value="' + esc(r.q.q || '') + '"><select class="input" name="kind"><option value="">All kinds</option>' +
       [['support', 'Support'], ['bug', 'Bug reports'], ['data_request', 'Data requests']].map(function (x) { return '<option value="' + x[0] + '"' + (r.q.kind === x[0] ? ' selected' : '') + '>' + x[1] + '</option>'; }).join('') + '</select><button class="btn">Filter</button></form>';
-    api('/admin/tickets' + qs({ status: tab === 'all' ? '' : tab, kind: r.q.kind, q: r.q.q, page: page, limit: PAGE })).then(function (j) {
+    var query = tab === 'awaiting' ? { awaiting: 'staff' } : tab === 'all' ? {} : { status: tab };
+    api('/admin/tickets' + qs(Object.assign(query, { kind: r.q.kind, q: r.q.q, page: page, limit: PAGE }))).then(function (j) {
       var list = j.tickets || [];
-      var kind = { support: ['Support', ''], bug: ['Bug', 'warn'], data_request: ['Data request', 'bad'] };
-      view(tabs([['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']], tab, function (t) { return '/support' + qs({ tab: t, kind: r.q.kind }); }) + filt + (list.length ? '<div class="stack">' + list.map(function (t) {
-        var k = kind[t.kind] || [t.kind, ''];
-        var meta = t.meta && Object.keys(t.meta).length ? '<div class="faint">' + Object.keys(t.meta).map(function (m) { return esc(m) + ': ' + esc(typeof t.meta[m] === 'object' ? JSON.stringify(t.meta[m]) : t.meta[m]); }).join(' · ') + '</div>' : '';
-        return '<div class="card stack"><div class="row between"><div class="row">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity + ' severity', t.severity === 'high' ? 'bad' : 'grey') : '') + '<h3>' + esc(t.subject) + '</h3></div>' + statusBadge(t.status) + '</div>' +
-          '<div class="faint">' + esc(t.category) + ' · from ' + userLink(t.user) + ' (' + esc(t.user && (t.user.email || t.user.phone) || '') + ') · ' + ago(t.created_at) + '</div>' +
-          '<div class="quote">' + esc(t.message) + '</div>' + meta + (t.admin_note ? '<div class="faint">Last reply / note: ' + esc(t.admin_note) + '</div>' : '') +
-          '<div class="row" style="justify-content:flex-end">' + (t.kind === 'data_request' && t.user ? '<a class="btn" href="#/users/' + esc(t.user.id) + '">Open account (export / close)</a>' : '') +
-          '<button class="btn primary" data-tick="' + esc(t.id) + '" data-cur="' + esc(t.status) + '">Reply / update</button></div></div>';
-      }).join('') + '</div>' : '<div class="card empty">No tickets here.</div>') + pager(page, j.total, r.raw));
+      view(tabs([['awaiting', 'Needs a reply'], ['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed'], ['all', 'All']], tab, function (t) { return '/support' + qs({ tab: t, kind: r.q.kind }); }) + filt +
+        (list.length ? '<div class="card">' + table(['', 'Request', 'From', 'Status', 'Last activity'], list, function (t) {
+          var k = KIND[t.kind] || [t.kind, ''];
+          return '<tr class="click" data-go="#/support/' + esc(t.id) + '"><td>' + (t.awaiting === 'staff' ? '<span class="dot hot" title="Waiting for support"></span>' : '<span class="dot"></span>') + '</td>' +
+            '<td><div class="row" style="gap:6px">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity, t.severity === 'high' ? 'bad' : 'grey') : '') + '<b>' + esc(t.subject) + '</b></div><div class="faint clamp">' + esc(t.admin_note && t.awaiting === 'user' ? 'You: ' + t.admin_note : t.message) + '</div></td>' +
+            '<td>' + name(t.user) + '<div class="faint">' + esc(t.category) + '</div></td><td>' + statusBadge(t.status) + (t.awaiting === 'user' ? '<div class="faint">waiting for user</div>' : '') + '</td><td class="num">' + ago(t.last_message_at || t.created_at) + '</td></tr>';
+        }) + '</div>' : '<div class="card empty">' + (tab === 'awaiting' ? 'All caught up: nobody is waiting for a reply.' : 'No tickets here.') + '</div>') + pager(page, j.total, r.raw));
       $('#tfilter').onsubmit = function (e) { e.preventDefault(); location.hash = '#/support' + qs({ tab: tab, q: e.target.q.value.trim(), kind: e.target.kind.value }); };
-      bind('[data-tick]', function (id, el) {
-        form({ title: 'Update ticket', fields: [{ name: 'status', label: 'Status', type: 'select', value: el.dataset.cur === 'open' ? 'in_progress' : el.dataset.cur, options: [['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed']] },
-          { name: 'adminNote', label: 'Reply to the user (sent as a notification; optional)', type: 'textarea' }, { name: 'notifyUser', label: 'Send it to the user', type: 'checkbox', value: true }], confirm: 'Save' })
-          .then(function (m) { if (m) act(api('/admin/tickets/' + id, { method: 'PATCH', body: { status: m.status, adminNote: m.adminNote, notifyUser: !!m.notifyUser } }), 'Ticket updated'); });
-      });
+      bindGo();
     }).catch(fail);
   };
+
+  function ticketPage(id) {
+    shell('support', 'Support request', '');
+    var last = null; var draft = '';
+    var STATUS = [['open', 'Open'], ['in_progress', 'In progress'], ['resolved', 'Resolved'], ['closed', 'Closed']];
+    function load(first) {
+      return api('/admin/tickets/' + id).then(function (j) {
+        var t = j.ticket; var u = t.user || {};
+        var staff = {}; (j.staff || []).forEach(function (s) { staff[s.id] = s; });
+        var tail = j.messages.length ? j.messages[j.messages.length - 1] : null;
+        var sig = j.messages.length + ':' + (tail ? tail.id + tail.read_at : '') + ':' + t.status + ':' + j.closed;
+        if (!first && sig === last) return; last = sig;
+        var box = $('#reply-body'); if (box) draft = box.value;
+        var k = KIND[t.kind] || [t.kind, ''];
+        var thread = j.messages.map(function (m) {
+          if (m.system) return '<div class="msg system">' + esc(m.body) + '<div class="meta">' + when(m.created_at) + '</div></div>';
+          var att = m.attachment && safeUrl(m.attachment) ? (/^image\//.test(m.attachment_type || '') ? '<a target="_blank" rel="noopener" href="' + safeUrl(m.attachment) + '"><img class="att" alt="" src="' + safeUrl(m.attachment) + '"></a>' : '<div><a target="_blank" rel="noopener" href="' + safeUrl(m.attachment) + '">📎 ' + esc(m.attachment_name || 'Attachment') + '</a></div>') : '';
+          var who = m.staff ? (staff[m.sender_id] ? plainName(staff[m.sender_id]) : 'Support') + ' (support)' : plainName(u);
+          return '<div class="msg' + (m.staff ? ' right' : '') + '">' + esc(m.body || '') + att + '<div class="meta">' + esc(who) + ' · ' + when(m.created_at) + (m.staff ? (m.read_at ? ' · seen' : ' · sent') : '') + '</div></div>';
+        }).join('');
+        var composer = j.closed
+          ? '<div class="alert info">This conversation is closed. The user can no longer send messages here. <button class="btn sm" data-st="in_progress">Reopen</button></div>'
+          : '<form class="stack" id="reply"><textarea class="input" id="reply-body" placeholder="Reply to ' + esc(plainName(u) || 'the user') + '… (Ctrl+Enter to send)" style="min-height:90px"></textarea>' +
+            '<div class="row between"><span class="faint">Arrives in their Messages, as a push notification and by email.</span><div class="row">' +
+            '<button type="button" class="btn" id="reply-resolve">Send &amp; resolve</button><button type="button" class="btn ghost-danger" id="reply-close">Send &amp; close</button><button class="btn primary">Send reply</button></div></div></form>';
+        view('<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/support">← All requests</a></div><div class="grid ticket-grid">' +
+          '<div class="card stack"><div class="row between"><div class="row">' + badge(k[0], k[1]) + (t.severity ? badge(t.severity + ' severity', t.severity === 'high' ? 'bad' : 'grey') : '') + '<h2>' + esc(t.subject) + '</h2></div>' + statusBadge(t.status) + '</div>' +
+          '<div class="msgs thread" id="thread">' + (thread || '<div class="empty">No messages yet.</div>') + '</div>' + composer + '</div>' +
+          '<div class="stack">' + section('Person', '<div class="row">' + avatar(u) + '<div>' + userLink(u) + '<div class="faint">' + label(u.role) + (u.is_suspended ? ' · suspended' : '') + '</div></div></div>' +
+            kv([['Email', esc(u.email || '')], ['Phone', esc(u.phone || '')], ['Member since', day(u.created_at)]])) +
+          section('Status', '<div class="row">' + STATUS.map(function (s) { return '<button class="btn sm' + (t.status === s[0] ? ' primary' : '') + '" data-st="' + s[0] + '"' + (t.status === s[0] ? ' disabled' : '') + '>' + s[1] + '</button>'; }).join('') + '</div>' +
+            '<div class="faint">Resolved keeps the chat open (a reply from the user re-opens the ticket). Closed locks the chat until you reopen it.</div>' +
+            kv([['Category', esc(t.category)], ['Opened', when(t.created_at)], ['Closed', t.closed_at ? when(t.closed_at) : '']])) +
+          (t.meta && Object.keys(t.meta).length ? section('Device', kv(Object.keys(t.meta).map(function (m) { return [m, esc(typeof t.meta[m] === 'object' ? JSON.stringify(t.meta[m]) : t.meta[m])]; }))) : '') +
+          (t.kind === 'data_request' ? section('Data request', '<p class="faint">Export or erase their data from the account page.</p><a class="btn" href="#/users/' + esc(u.id) + '">Open account</a>') : '') +
+          ((j.otherTickets || []).length ? section('Their other requests', table(['Subject', 'Status'], j.otherTickets, function (o) { return '<tr class="click" data-go="#/support/' + esc(o.id) + '"><td>' + esc(o.subject) + '<div class="faint">' + ago(o.created_at) + '</div></td><td>' + statusBadge(o.status) + '</td></tr>'; })) : '') +
+          notesBlock('ticket', t.id, j.notes) + '</div></div>');
+        var th = $('#thread'); if (th) th.scrollTop = th.scrollHeight;
+        var rb = $('#reply-body'); if (rb) { rb.value = draft; if (first) rb.focus(); }
+        bindGo(); bindNotes();
+        bind('[data-st]', function (st) {
+          var go = function () { act(api('/admin/tickets/' + id, { method: 'PATCH', body: { status: st } }), st === 'closed' ? 'Closed: the user can no longer reply' : 'Status updated'); };
+          if (st === 'closed') form({ title: 'Close this conversation?', body: 'The user’s chat is locked straight away and they can’t send more messages on this request.', confirm: 'Close', danger: true }).then(function (v) { if (v) go(); });
+          else go();
+        });
+        var send = function (status) {
+          var body = ($('#reply-body').value || '').trim(); if (!body) { toast('Write a reply first', true); return; }
+          $$('#reply button').forEach(function (b) { b.disabled = true; });
+          post('/admin/tickets/' + id + '/messages', { body: body, status: status }).then(function () { draft = ''; $('#reply-body').value = ''; toast(status === 'closed' ? 'Sent and closed' : status === 'resolved' ? 'Sent and resolved' : 'Reply sent'); last = null; return load(); })
+            .catch(function (e) { toast(e.message, true); $$('#reply button').forEach(function (b) { b.disabled = false; }); });
+        };
+        var f = $('#reply'); if (f) {
+          f.onsubmit = function (e) { e.preventDefault(); send(); };
+          rb.onkeydown = function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } };
+          on('reply-resolve', function () { send('resolved'); });
+          on('reply-close', function () { form({ title: 'Send and close?', body: 'The user’s chat locks right after your reply.', confirm: 'Send & close', danger: true }).then(function (v) { if (v) send('closed'); }); });
+        }
+      });
+    }
+    load(true).catch(fail);
+    // New messages from the user show up without a reload.
+    pageTimer = setInterval(function () { if (document.visibilityState === 'visible' && !$('#modal-root').innerHTML) load().catch(function () {}); }, 5000);
+  }
 
   // ═════════ Feedback ═════════
   PAGES.feedback = function (r) {
@@ -1180,6 +1244,474 @@
       $('#afilter').onsubmit = function (e) { e.preventDefault(); location.hash = '#/audit' + qs({ action: e.target.action.value, targetId: e.target.targetId.value.trim() }); };
     }).catch(function (e) { view('<div class="err">' + esc(e.code === 'FEATURE_UNAVAILABLE' ? 'Run migration 011_admin_audit.sql in Supabase to turn on the audit log.' : e.message) + '</div>'); });
   };
+
+  // ═════════ Mailing ═════════
+  // Contacts, lists, templates, campaigns and automations. Rules (consent, suppression) live in services/mailing.ts.
+  var ROLE_OPTS = [['tenant', 'Tenants'], ['landlord', 'Landlords'], ['estate_manager', 'Estate managers'], ['agent', 'Agents'], ['artisan', 'Artisans'], ['admin', 'Admins']];
+  var MERGE_TAGS = [['{{first_name|there}}', 'First name'], ['{{full_name}}', 'Full name'], ['{{email}}', 'Email'], ['{{attributes.city}}', 'Custom field (city)'], ['{{preferences_url}}', 'Preferences link'], ['{{unsubscribe_url}}', 'Unsubscribe link'], ['{{app_url}}', 'Website link']];
+  var BTN_STYLE = 'display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:9px;font-weight:600';
+  var SNIPPETS = {
+    heading: '<h1>Your headline</h1>\n', para: '<p>Write something here.</p>\n',
+    button: '<p><a href="https://rentcreeb.com" style="' + BTN_STYLE + '">Call to action</a></p>\n',
+    image: '<p><img src="https://" alt="" style="max-width:100%;border-radius:10px"></p>\n',
+    divider: '<hr style="border:0;border-top:1px solid #e3e7f0;margin:22px 0">\n',
+  };
+  var STARTER = 'Hi {{first_name|there}},\n\nWrite your message here. Plain text works: blank lines become paragraphs, **bold** and [links](https://rentcreeb.com) are supported, or switch to HTML any time.\n\nThe RentCreeb team';
+  function pct(n) { return (n || 0).toLocaleString('en-NG', { maximumFractionDigits: 1 }) + '%'; }
+  function num(n) { return Number(n || 0).toLocaleString('en-NG'); }
+  function mailNotReady(st) {
+    if (!st) return '';
+    var miss = [];
+    if (!st.provider) miss.push('<b>RESEND_API_KEY</b> (the email provider key)');
+    if (!st.publicUrl) miss.push('<b>API_PUBLIC_URL</b> (this server’s public address, used for unsubscribe links)');
+    var warn = miss.length ? '<div class="alert bad" style="margin-bottom:14px">Emails can’t be sent yet. Add ' + miss.join(' and ') + ' to the server environment, then redeploy.</div>' : '';
+    if (!miss.length && !st.webhook) warn += '<div class="alert info" style="margin-bottom:14px">Tip: add a Resend webhook pointing to <code>' + esc((st.publicUrl || '') + '/mail/webhooks/resend') + '</code> and set <b>RESEND_WEBHOOK_SECRET</b>, so bounces and spam complaints stop future sends automatically.</div>';
+    return warn;
+  }
+  function mailMissing(e) { return e && (e.code === 'FEATURE_UNAVAILABLE' || /mailing_/.test(e.message || '')); }
+  function mailFail(e) { view('<div class="err">' + esc(mailMissing(e) ? 'Run migration 018_support_chat_and_mailing.sql in Supabase to turn on the mailing list.' : e.message) + '</div>'); }
+
+  // ── content + audience editors (shared by campaigns and automations) ──
+  function contentEditor(d) {
+    var tools = '<div class="row toolbar">' + [['heading', 'Heading'], ['para', 'Paragraph'], ['button', 'Button'], ['image', 'Image'], ['divider', 'Divider']].map(function (x) { return '<button type="button" class="btn sm" data-snip="' + x[0] + '">+ ' + x[1] + '</button>'; }).join('') +
+      '<select class="input sm" id="ed-tag" aria-label="Insert personalisation"><option value="">Insert personalisation…</option>' + MERGE_TAGS.map(function (t) { return '<option value="' + esc(t[0]) + '">' + esc(t[1]) + '</option>'; }).join('') + '</select></div>';
+    return '<div class="grid cols-2 tight"><label class="field"><span>Subject line</span><input class="input" id="ed-subject" maxlength="200" value="' + esc(d.subject || '') + '" placeholder="e.g. New homes in Lekki this week, {{first_name|there}}"></label>' +
+      '<label class="field"><span>Preview text <span class="faint">(shown after the subject in the inbox)</span></span><input class="input" id="ed-preheader" maxlength="200" value="' + esc(d.preheader || '') + '"></label>' +
+      '<label class="field"><span>Sender name</span><input class="input" id="ed-from" maxlength="80" value="' + esc(d.from_name || '') + '" placeholder="RentCreeb"></label>' +
+      '<label class="field"><span>Reply-to email <span class="faint">(optional)</span></span><input class="input" id="ed-reply" type="email" value="' + esc(d.reply_to || '') + '" placeholder="hello@rentcreeb.com"></label></div>' +
+      '<div class="editor"><div class="stack"><div class="row between"><b>Email body</b><span class="faint">Plain text or HTML</span></div>' + tools +
+      '<textarea class="input code" id="ed-html" spellcheck="true">' + esc(d.html || STARTER) + '</textarea></div>' +
+      '<div class="stack"><div class="row between"><b>Preview</b><span class="faint" id="ed-pstatus"></span></div><iframe id="ed-preview" class="preview" sandbox="" title="Email preview"></iframe><div class="faint" id="ed-psubject"></div></div></div>';
+  }
+  function readContent() {
+    return { subject: $('#ed-subject').value.trim(), preheader: $('#ed-preheader').value.trim() || null, from_name: $('#ed-from').value.trim() || null, reply_to: $('#ed-reply').value.trim() || null, html: $('#ed-html').value };
+  }
+  function bindEditor(kindOf) {
+    var ta = $('#ed-html'); var timer = null;
+    var insert = function (txt) { var a = ta.selectionStart, b = ta.selectionEnd; ta.value = ta.value.slice(0, a) + txt + ta.value.slice(b); ta.focus(); ta.selectionStart = ta.selectionEnd = a + txt.length; refresh(); };
+    bind('[data-snip]', function (k) { insert(SNIPPETS[k]); });
+    $('#ed-tag').onchange = function (e) { if (e.target.value) insert(e.target.value); e.target.value = ''; };
+    var refresh = function () {
+      clearTimeout(timer); $('#ed-pstatus').textContent = 'updating…';
+      timer = setTimeout(function () {
+        post('/admin/mailing/preview', Object.assign(readContent(), { kind: kindOf() })).then(function (p) {
+          var fr = $('#ed-preview'); if (!fr) return; fr.srcdoc = p.html; $('#ed-psubject').textContent = 'Subject: ' + p.subject; $('#ed-pstatus').textContent = 'sample person: Ada Okafor';
+        }).catch(function (e) { var s = $('#ed-pstatus'); if (s) s.textContent = e.message; });
+      }, 500);
+    };
+    ['#ed-html', '#ed-subject', '#ed-preheader'].forEach(function (s) { $(s).addEventListener('input', refresh); });
+    refresh();
+    return refresh;
+  }
+  function audienceEditor(a, lists) {
+    a = a || {};
+    var checks = function (name, opts, vals) { return '<div class="checks">' + opts.map(function (o) { return '<label class="check"><input type="checkbox" name="' + name + '" value="' + esc(o[0]) + '"' + ((vals || []).indexOf(o[0]) >= 0 ? ' checked' : '') + '><span>' + esc(o[1]) + '</span></label>'; }).join('') + '</div>'; };
+    return '<div class="stack" id="aud">' +
+      '<label class="field"><span>Who</span><select class="input" id="aud-source"><option value="all"' + (a.source === 'all' || !a.source ? ' selected' : '') + '>Everyone (app users and outside contacts)</option><option value="app_users"' + (a.source === 'app_users' ? ' selected' : '') + '>App users only</option><option value="contacts"' + (a.source === 'contacts' ? ' selected' : '') + '>Outside contacts only (not app users)</option></select></label>' +
+      (lists.length ? '<div class="field"><span>Only people on these lists <span class="faint">(none ticked = no list filter)</span></span>' + checks('aud-list', lists.map(function (l) { return [l.id, l.name + ' (' + l.members + ')']; }), a.listIds) + '</div>' : '') +
+      '<div class="field"><span>App users with these roles <span class="faint">(none = any role)</span></span>' + checks('aud-role', ROLE_OPTS, a.roles) + '</div>' +
+      '<div class="grid cols-2 tight"><label class="field"><span>ID verification</span><select class="input" id="aud-ver"><option value="any">Any</option><option value="verified"' + (a.verification === 'verified' ? ' selected' : '') + '>NIN-verified only</option><option value="unverified"' + (a.verification === 'unverified' ? ' selected' : '') + '>Not verified yet</option></select></label>' +
+      '<label class="field"><span>Has any of these tags</span><input class="input" id="aud-tags" placeholder="e.g. lekki, investor" value="' + esc((a.tags || []).join(', ')) + '"></label>' +
+      '<label class="field"><span>Leave out people tagged</span><input class="input" id="aud-xtags" placeholder="e.g. do-not-email" value="' + esc((a.excludeTags || []).join(', ')) + '"></label></div>' +
+      '<div class="row"><button type="button" class="btn" id="aud-est-btn">Count recipients</button><span id="aud-est" class="faint"></span></div></div>';
+  }
+  function splitTags(v) { return String(v || '').split(/[,;]/).map(function (t) { return t.trim().toLowerCase(); }).filter(Boolean); }
+  function readAudience() {
+    var vals = function (n) { return $$('input[name="' + n + '"]:checked').map(function (x) { return x.value; }); };
+    return { source: $('#aud-source').value, listIds: vals('aud-list'), roles: vals('aud-role'), verification: $('#aud-ver').value, tags: splitTags($('#aud-tags').value), excludeTags: splitTags($('#aud-xtags').value) };
+  }
+  function estimate(kind) {
+    var el = $('#aud-est'); el.textContent = 'Counting…';
+    return post('/admin/mailing/estimate', { audience: readAudience(), kind: kind }).then(function (e) {
+      var ex = Object.keys(e.excluded || {}).map(function (k) { return num(e.excluded[k]) + ' ' + k; }).join(', ');
+      el.innerHTML = '<b>' + num(e.recipients) + ' will receive it</b>' + (e.matched !== e.recipients ? ' · ' + num(e.matched - e.recipients) + ' matched but left out' + (ex ? ' (' + esc(ex) + ')' : '') : '');
+      return e;
+    }).catch(function (err) { el.textContent = err.message; throw err; });
+  }
+
+  // ── overview ──
+  PAGES.mailing = function () {
+    shell('mailing', 'Mailing list', 'Newsletters, announcements and automated emails to app users and outside contacts.',
+      '<a class="btn primary" href="#/mail-campaigns/new">New campaign</a>');
+    api('/admin/mailing/overview').then(function (o) {
+      if (!o.available) return view(mailNotReady(o.status) + '<div class="err">Run migration 018_support_chat_and_mailing.sql in Supabase to turn on the mailing list.</div>');
+      var c = o.contacts;
+      var card = function (n, l, href) { return '<a class="card stat" href="' + href + '"><span class="n">' + n + '</span><span class="l">' + esc(l) + '</span></a>'; };
+      view(mailNotReady(o.status) + '<div class="grid cols-4">' +
+        card(num(c.subscribed), 'Subscribed contacts', '#/mail-contacts?status=subscribed') + card(num(c.appUsers), 'App users synced', '#/mail-contacts?source=app_users') +
+        card(num(c.marketingConsent), 'App users allowing marketing', '#/mail-contacts?source=app_users') + card(num(c.unsubscribed), 'Unsubscribed', '#/mail-contacts?status=unsubscribed') +
+        card(num(c.bounced + c.complained), 'Bounced or spam complaints', '#/mail-contacts?status=bounced') + card(num(c.pending), 'Waiting to confirm', '#/mail-contacts?status=pending') +
+        card(num(o.sent30), 'Emails sent, last 30 days', '#/mail-campaigns') + card(num(o.activeAutomations), 'Automations running', '#/mail-automations') + '</div>' +
+        '<div class="grid cols-2" style="margin-top:14px">' + section('New contacts, last 30 days', chart(o.trends.newContacts)) + section('Opens, last 30 days', chart(o.trends.opens)) + '</div>' +
+        '<h2 class="section-title">Recent campaigns <a class="btn sm" href="#/mail-campaigns">All campaigns →</a></h2><div class="card">' +
+        table(['Campaign', 'Type', 'Status', 'Recipients', 'When'], o.recentCampaigns, function (x) {
+          return '<tr class="click" data-go="#/mail-campaigns/' + esc(x.id) + '"><td>' + esc(x.name) + '</td><td>' + label(x.kind) + '</td><td>' + statusBadge(x.status) + '</td><td class="num">' + num(x.recipients) + '</td><td class="num">' + when(x.finished_at || x.started_at || x.scheduled_at) + '</td></tr>';
+        }, 'No campaigns yet. Start with “New campaign”.') + '</div>' +
+        '<div class="card stack" style="margin-top:14px"><h3>How consent works</h3><p class="muted" style="margin:0"><b>Marketing</b> emails go only to subscribed contacts, and app users must also have <i>Privacy → Marketing</i> switched on in the app (it is off by default). Every marketing email carries an unsubscribe link and a one-click unsubscribe header. ' +
+        '<b>Service</b> emails (account news, policy changes) go to every app user with an account, even if they unsubscribed from marketing. Bounced addresses and spam complaints are never emailed again.</p></div>');
+      bindGo();
+    }).catch(mailFail);
+  };
+
+  // ── campaigns ──
+  PAGES['mail-campaigns'] = function (r) {
+    if (r.path[1] === 'new') {
+      shell('mail-campaigns', 'New campaign', '');
+      return post('/admin/mailing/campaigns', { name: 'Untitled campaign ' + day(new Date().toISOString()), html: STARTER }).then(function (j) { location.replace('#/mail-campaigns/' + j.campaign.id); }).catch(mailFail);
+    }
+    if (r.path[1]) return campaignPage(r.path[1]);
+    var tab = r.q.tab || 'all'; var page = Number(r.q.page || 1);
+    shell('mail-campaigns', 'Campaigns', 'One-off emails: newsletters, offers, announcements.', '<a class="btn primary" href="#/mail-campaigns/new">New campaign</a>');
+    api('/admin/mailing/campaigns' + qs({ status: tab === 'all' ? '' : tab, page: page, limit: PAGE })).then(function (j) {
+      view(tabs([['all', 'All'], ['draft', 'Drafts'], ['scheduled', 'Scheduled'], ['sending', 'Sending'], ['sent', 'Sent'], ['paused', 'Paused'], ['cancelled', 'Cancelled']], tab, function (t) { return '/mail-campaigns' + qs({ tab: t }); }) +
+        '<div class="card">' + table(['Campaign', 'Type', 'Status', 'Recipients', 'Opened', 'Clicked', 'When'], j.campaigns, function (x) {
+          var s = x.stats;
+          return '<tr class="click" data-go="#/mail-campaigns/' + esc(x.id) + '"><td><b>' + esc(x.name) + '</b><div class="faint">' + esc(x.subject || 'No subject yet') + '</div></td><td>' + label(x.kind) + '</td><td>' + statusBadge(x.status) + '</td>' +
+            '<td class="num">' + (x.recipients ? num(x.recipients) : '—') + '</td><td class="num">' + (s ? pct(s.openRate) : '—') + '</td><td class="num">' + (s ? pct(s.clickRate) : '—') + '</td>' +
+            '<td class="num">' + (x.status === 'scheduled' ? 'for ' + when(x.scheduled_at) : when(x.finished_at || x.started_at || x.updated_at)) + '</td></tr>';
+        }, 'No campaigns here.') + '</div>' + pager(page, j.total, r.raw));
+      bindGo();
+    }).catch(mailFail);
+  };
+
+  function campaignPage(id) {
+    shell('mail-campaigns', 'Campaign', '');
+    Promise.all([api('/admin/mailing/campaigns/' + id), api('/admin/mailing/lists'), api('/admin/mailing/templates'), api('/admin/mailing/overview')]).then(function (res) {
+      var c = res[0].campaign;
+      if (c.status === 'draft' || c.status === 'scheduled') return campaignEditor(c, res[1].lists, res[2].templates, res[3].status);
+      campaignReport(id, res[0]);
+    }).catch(mailFail);
+  }
+
+  function campaignEditor(c, lists, templates, status) {
+    shell('mail-campaigns', c.status === 'scheduled' ? 'Scheduled campaign' : 'Edit campaign', c.status === 'scheduled' ? 'Goes out ' + when(c.scheduled_at) + '. Unschedule it to make changes.' : 'Changes are saved when you press Save, test or send.');
+    var locked = c.status === 'scheduled';
+    view(mailNotReady(status) + '<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/mail-campaigns">← Campaigns</a>' +
+      (templates.length ? '<select class="input sm" id="tpl-load"><option value="">Start from a template…</option>' + templates.map(function (t) { return '<option value="' + esc(t.id) + '">' + esc(t.name) + '</option>'; }).join('') + '</select>' : '') +
+      '<button class="btn sm" id="tpl-save">Save as template</button><button class="btn sm" id="c-dup">Duplicate</button><button class="btn sm ghost-danger" id="c-del">Delete</button></div>' +
+      '<fieldset class="stack plain"' + (locked ? ' disabled' : '') + '>' +
+      '<div class="card stack"><div class="grid cols-2 tight"><label class="field"><span>Campaign name <span class="faint">(only you see this)</span></span><input class="input" id="c-name" maxlength="120" value="' + esc(c.name) + '"></label>' +
+      '<label class="field"><span>Type</span><select class="input" id="c-kind"><option value="marketing"' + (c.kind === 'marketing' ? ' selected' : '') + '>Marketing: offers, newsletters (needs consent, has unsubscribe link)</option><option value="service"' + (c.kind === 'service' ? ' selected' : '') + '>Service: important account news (all app users)</option></select></label></div>' +
+      '<label class="check"><input type="checkbox" id="c-track"' + (c.track !== false ? ' checked' : '') + '><span>Track opens and link clicks</span></label></div>' +
+      section('Audience', audienceEditor(c.audience, lists)) + section('Content', contentEditor(c)) + '</fieldset>' +
+      '<div class="card row between sticky-bar"><span class="faint" id="c-saved"></span><div class="row">' +
+      (locked ? '<button class="btn" id="c-unsched">Unschedule</button><button class="btn danger" id="c-cancel">Cancel campaign</button>'
+        : '<button class="btn" id="c-save">Save draft</button><button class="btn" id="c-test">Send test</button><button class="btn" id="c-sched">Schedule…</button><button class="btn primary" id="c-send">Send now…</button>') + '</div></div>');
+    var kindOf = function () { return $('#c-kind').value; };
+    var refresh = bindEditor(kindOf);
+    $('#c-kind').onchange = refresh;
+    var body = function () { return Object.assign({ name: $('#c-name').value.trim() || 'Untitled campaign', kind: kindOf(), track: $('#c-track').checked, audience: readAudience() }, readContent()); };
+    var save = function (quiet) { return api('/admin/mailing/campaigns/' + c.id, { method: 'PATCH', body: body() }).then(function () { $('#c-saved').textContent = 'Saved ' + new Date().toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit' }); if (!quiet) toast('Draft saved'); }).catch(function (e) { toast(e.message, true); throw e; }); };
+    on('aud-est-btn', function () { estimate(kindOf()).catch(function () {}); });
+    on('c-save', function () { save(); });
+    on('c-test', function () {
+      form({ title: 'Send a test', body: 'Personalisation uses the contact with that email if there is one, or a sample person. Test emails are not tracked.', fields: [{ name: 'to', label: 'Send to (up to 5, comma separated)', value: me.email || '', required: true }], confirm: 'Send test' }).then(function (v) {
+        if (!v) return;
+        save(true).then(function () { return post('/admin/mailing/test', Object.assign(readContent(), { kind: kindOf(), to: splitTags(v.to).slice(0, 5) })); }).then(function () { toast('Test sent'); }).catch(function (e) { toast(e.message, true); });
+      });
+    });
+    on('c-send', function () {
+      save(true).then(function () { return estimate(kindOf()); }).then(function (e) {
+        if (!e.recipients) { toast('Nobody in this audience can receive it', true); return; }
+        return form({ title: 'Send to ' + num(e.recipients) + ' people now?', body: 'Subject: “' + $('#ed-subject').value + '”. Emails go out at about ' + num(status && status.ratePerMinute) + ' per minute. You can pause or cancel while it sends.', confirm: 'Send now' }).then(function (v) {
+          if (v) return post('/admin/mailing/campaigns/' + c.id + '/send').then(function (r) { toast('Sending to ' + num(r.recipients) + ' people'); route(); });
+        });
+      }).catch(function (e) { toast(e.message, true); });
+    });
+    on('c-sched', function () {
+      var soon = new Date(Date.now() + 3600e3); soon.setMinutes(0, 0, 0);
+      var local = new Date(soon.getTime() - soon.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      form({ title: 'Schedule campaign', body: 'Who receives it is worked out at send time, so new subscribers by then are included.', fields: [{ name: 'at', label: 'Send at (your local time)', type: 'datetime-local', value: local, required: true }], confirm: 'Schedule' }).then(function (v) {
+        if (!v) return;
+        save(true).then(function () { return post('/admin/mailing/campaigns/' + c.id + '/send', { scheduledAt: new Date(v.at).toISOString() }); }).then(function () { toast('Scheduled for ' + when(new Date(v.at).toISOString())); route(); }).catch(function (e) { toast(e.message, true); });
+      });
+    });
+    on('c-unsched', function () { act(post('/admin/mailing/campaigns/' + c.id + '/unschedule'), 'Back to draft'); });
+    on('c-cancel', function () { form({ title: 'Cancel this campaign?', body: 'It will not be sent. You can duplicate it later.', confirm: 'Cancel campaign', danger: true }).then(function (v) { if (v) act(post('/admin/mailing/campaigns/' + c.id + '/cancel'), 'Cancelled'); }); });
+    on('c-dup', function () { post('/admin/mailing/campaigns/' + c.id + '/duplicate').then(function (j) { toast('Copy created'); location.hash = '#/mail-campaigns/' + j.campaign.id; }).catch(function (e) { toast(e.message, true); }); });
+    on('c-del', function () { form({ title: 'Delete this draft?', confirm: 'Delete', danger: true }).then(function (v) { if (v) api('/admin/mailing/campaigns/' + c.id, { method: 'DELETE' }).then(function () { toast('Deleted'); location.hash = '#/mail-campaigns'; }).catch(function (e) { toast(e.message, true); }); }); });
+    on('tpl-save', function () {
+      form({ title: 'Save as template', fields: [{ name: 'name', label: 'Template name', value: $('#c-name').value, required: true }], confirm: 'Save template' }).then(function (v) {
+        if (v) post('/admin/mailing/templates', Object.assign(readContent(), { name: v.name })).then(function () { toast('Template saved'); }).catch(function (e) { toast(e.message, true); });
+      });
+    });
+    var tl = $('#tpl-load'); if (tl) tl.onchange = function () {
+      var t = templates.filter(function (x) { return x.id === tl.value; })[0]; tl.value = ''; if (!t) return;
+      form({ title: 'Replace the content with “' + t.name + '”?', body: 'The subject, preview text and body are replaced.', confirm: 'Use template' }).then(function (v) {
+        if (!v) return; $('#ed-subject').value = t.subject || ''; $('#ed-preheader').value = t.preheader || ''; $('#ed-html').value = t.html || ''; refresh();
+      });
+    };
+  }
+
+  function campaignReport(id, j) {
+    var c = j.campaign; var s = j.stats || {};
+    shell('mail-campaigns', c.name, label(c.kind) + ' campaign · ' + (c.finished_at ? 'finished ' + when(c.finished_at) : 'started ' + when(c.started_at)));
+    var stat = function (n, l, sub) { return '<div class="card stat"><span class="n">' + n + '</span><span class="l">' + esc(l) + (sub ? ' · ' + sub : '') + '</span></div>'; };
+    var done = s.total ? Math.round(((s.total - s.queued) / s.total) * 100) : 100;
+    var eng = '';
+    var tab = 'all';
+    var render = function () {
+      view('<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/mail-campaigns">← Campaigns</a>' + statusBadge(c.status) +
+        (c.status === 'sending' ? '<button class="btn sm" id="r-pause">Pause</button>' : '') + (c.status === 'paused' ? '<button class="btn sm primary" id="r-resume">Resume</button>' : '') +
+        (c.status === 'sending' || c.status === 'paused' ? '<button class="btn sm ghost-danger" id="r-cancel">Cancel the rest</button>' : '') +
+        '<button class="btn sm" id="r-dup">Duplicate</button><button class="btn sm" id="r-view">View email</button><button class="btn sm" id="r-csv">Export recipients</button></div>' +
+        (c.status === 'sending' || c.status === 'paused' ? '<div class="card stack" style="margin-bottom:14px"><div class="row between"><b>' + (c.status === 'paused' ? 'Paused' : 'Sending…') + '</b><span class="faint">' + num(s.total - s.queued) + ' of ' + num(s.total) + '</span></div><div class="progress"><span style="width:' + done + '%"></span></div></div>' : '') +
+        '<div class="grid cols-4">' + stat(num(s.sent), 'Sent', s.delivered ? num(s.delivered) + ' confirmed delivered' : '') + stat(pct(s.openRate), 'Opened', num(s.opened) + ' people') + stat(pct(s.clickRate), 'Clicked', num(s.clicked) + ' people') +
+        stat(pct(s.unsubscribeRate), 'Unsubscribed', num(s.unsubscribed)) + stat(num(s.bounced), 'Bounced', pct(s.bounceRate)) + stat(num(s.complained), 'Spam complaints') + stat(num(s.failed), 'Failed') + stat(num(s.skipped), 'Skipped', 'unsubscribed before send') + '</div>' +
+        '<div class="grid cols-2" style="margin-top:14px">' + section('Most clicked links', table(['Link', 'Clicks', 'People'], j.links, function (l) { return '<tr><td class="clamp"><a href="' + safeUrl(l.url) + '" target="_blank" rel="noopener">' + esc(l.url) + '</a></td><td class="num">' + num(l.clicks) + '</td><td class="num">' + num(l.people) + '</td></tr>'; }, 'No clicks yet.')) +
+        section('Details', kv([['Subject', esc(c.subject)], ['Preview text', esc(c.preheader || '')], ['Sender', esc(c.from_name || 'RentCreeb')], ['Reply-to', esc(c.reply_to || '')], ['Created by', c.creator ? name(c.creator) : ''], ['Tracking', c.track !== false ? 'On' : 'Off']])) + '</div>' +
+        '<h2 class="section-title">Recipients</h2>' + tabs([['all', 'All'], ['opened', 'Opened'], ['not_opened', 'Not opened'], ['clicked', 'Clicked'], ['unsubscribed', 'Unsubscribed'], ['bounced', 'Bounced'], ['failed', 'Failed']], tab, function (t) { return '/mail-campaigns/' + id + '?r=' + t; }) + '<div id="rcpts"><div class="spinner">Loading…</div></div>');
+      $$('.tabs .tab').forEach(function (a) { a.onclick = function (e) { e.preventDefault(); tab = a.getAttribute('href').split('r=')[1]; render(); }; });
+      var p = { page: 1, limit: 50 };
+      if (['opened', 'not_opened', 'clicked', 'unsubscribed'].indexOf(tab) >= 0) p.engaged = tab; else if (tab !== 'all') p.status = tab;
+      api('/admin/mailing/campaigns/' + id + '/recipients' + qs(p)).then(function (rj) {
+        var el = $('#rcpts'); if (!el) return;
+        el.innerHTML = '<div class="card">' + table(['Email', 'Status', 'Sent', 'Opened', 'Clicked'], rj.recipients, function (x) {
+          return '<tr class="click" data-go="#/mail-contacts/' + esc(x.contact_id) + '"><td>' + esc(x.email) + (x.error ? '<div class="faint">' + esc(x.error) + '</div>' : '') + '</td><td>' + statusBadge(x.unsubscribed_at ? 'unsubscribed' : x.status) + '</td><td class="num">' + when(x.sent_at) + '</td>' +
+            '<td class="num">' + (x.opened_at ? when(x.opened_at) + (x.open_count > 1 ? ' (' + x.open_count + '×)' : '') : '—') + '</td><td class="num">' + (x.clicked_at ? x.click_count + ' click' + (x.click_count > 1 ? 's' : '') : '—') + '</td></tr>';
+        }, 'Nobody here.') + (rj.total > 50 ? '<div class="faint" style="padding-top:8px">Showing 50 of ' + num(rj.total) + '. Export for the full list.</div>' : '') + '</div>';
+        bindGo();
+      }).catch(function (e) { var el = $('#rcpts'); if (el) el.innerHTML = '<div class="err">' + esc(e.message) + '</div>'; });
+      var step = function (a, msg) { return function () { act(post('/admin/mailing/campaigns/' + id + '/' + a), msg); }; };
+      on('r-pause', step('pause', 'Paused')); on('r-resume', step('resume', 'Resumed'));
+      on('r-cancel', function () { form({ title: 'Cancel the rest?', body: 'People who already got it keep it; nobody else will.', confirm: 'Cancel the rest', danger: true }).then(function (v) { if (v) step('cancel', 'Cancelled')(); }); });
+      on('r-dup', function () { post('/admin/mailing/campaigns/' + id + '/duplicate').then(function (d) { toast('Copy created'); location.hash = '#/mail-campaigns/' + d.campaign.id; }).catch(function (e) { toast(e.message, true); }); });
+      on('r-csv', function () { download('/admin/mailing/campaigns/' + id + '/recipients.csv', 'campaign-recipients.csv'); });
+      on('r-view', function () {
+        post('/admin/mailing/preview', { kind: c.kind, subject: c.subject, preheader: c.preheader, html: c.html, from_name: c.from_name }).then(function (p) {
+          form({ title: p.subject, html: '<iframe class="preview tall" sandbox="" title="Email" id="v-frame"></iframe>', wide: true, confirm: false });
+          $('#v-frame').srcdoc = p.html;
+        }).catch(function (e) { toast(e.message, true); });
+      });
+    };
+    render();
+    if (c.status === 'sending') pageTimer = setInterval(function () {
+      if (document.visibilityState !== 'visible' || $('#modal-root').innerHTML) return;
+      api('/admin/mailing/campaigns/' + id).then(function (n) { j = n; c = n.campaign; s = n.stats || {}; done = s.total ? Math.round(((s.total - s.queued) / s.total) * 100) : 100; render(); if (c.status !== 'sending') stopPage(); }).catch(function () {});
+    }, 8000);
+  }
+
+  // ── contacts ──
+  PAGES['mail-contacts'] = function (r) {
+    if (r.path[1]) return contactPage(r.path[1]);
+    var page = Number(r.q.page || 1);
+    shell('mail-contacts', 'Contacts', 'Everyone you can email. App users are added automatically.',
+      '<button class="btn" id="mc-sync">Sync app users</button><button class="btn" id="mc-export">Export CSV</button><button class="btn" id="mc-import">Import CSV</button><button class="btn primary" id="mc-add">Add contact</button>');
+    Promise.all([api('/admin/mailing/contacts' + qs({ q: r.q.q, status: r.q.status, source: r.q.source, listId: r.q.listId, tag: r.q.tag, page: page, limit: PAGE })), api('/admin/mailing/lists')]).then(function (res) {
+      var j = res[0]; var lists = res[1].lists; var listName = {}; lists.forEach(function (l) { listName[l.id] = l.name; });
+      var sel = function (nm, opts, cur) { return '<select class="input" name="' + nm + '">' + opts.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (String(cur || '') === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select>'; };
+      view('<form class="row" id="mcf" style="margin-bottom:12px"><input class="input" name="q" placeholder="Search email or name" value="' + esc(r.q.q || '') + '">' +
+        sel('status', [['', 'Any status'], ['subscribed', 'Subscribed'], ['unsubscribed', 'Unsubscribed'], ['pending', 'Waiting to confirm'], ['bounced', 'Bounced'], ['complained', 'Spam complaint']], r.q.status) +
+        sel('source', [['', 'Any source'], ['app_users', 'App users'], ['manual', 'Added by hand'], ['import', 'Imported'], ['signup_form', 'Sign-up form']], r.q.source) +
+        sel('listId', [['', 'Any list']].concat(lists.map(function (l) { return [l.id, l.name]; })), r.q.listId) +
+        '<input class="input" name="tag" placeholder="Tag" value="' + esc(r.q.tag || '') + '" style="max-width:130px"><button class="btn">Filter</button></form>' +
+        '<div class="card"><div class="row bulk" id="bulk" hidden><b id="bulk-n"></b><select class="input sm" id="bulk-act"><option value="">Do with selected…</option><option value="add_to_list">Add to list</option><option value="remove_from_list">Remove from list</option><option value="add_tag">Add tag</option><option value="remove_tag">Remove tag</option><option value="unsubscribe">Unsubscribe</option><option value="resubscribe">Resubscribe</option><option value="delete">Delete permanently</option></select></div>' +
+        table(['<input type="checkbox" id="ck-all" aria-label="Select all">', 'Contact', 'Status', 'Lists', 'Tags', 'Added'], j.contacts, function (x) {
+          var mem = (x.members || []).filter(function (m) { return m.status === 'subscribed'; }).map(function (m) { return esc(listName[m.list_id] || ''); }).filter(Boolean).join(', ');
+          return '<tr><td><input type="checkbox" class="ck" value="' + esc(x.id) + '" aria-label="Select"></td><td class="click" data-go="#/mail-contacts/' + esc(x.id) + '"><b>' + esc(x.email) + '</b><div class="faint">' + esc([x.first_name, x.last_name].filter(Boolean).join(' ')) + (x.user_id ? ' ' + badge('app user', 'grey') : '') + '</div></td>' +
+            '<td>' + statusBadge(x.status) + '</td><td class="faint">' + (mem || '—') + '</td><td>' + (x.tags || []).map(function (t) { return badge(t, 'grey'); }).join(' ') + '</td><td class="num">' + day(x.created_at) + '</td></tr>';
+        }, 'No contacts match. Use “Sync app users” to add everyone with an account.').replace('<th>&lt;input type=&quot;checkbox&quot; id=&quot;ck-all&quot; aria-label=&quot;Select all&quot;&gt;</th>', '<th><input type="checkbox" id="ck-all" aria-label="Select all"></th>') + '</div>' + pager(page, j.total, r.raw));
+      bindGo();
+      $('#mcf').onsubmit = function (e) { e.preventDefault(); var x = e.target; location.hash = '#/mail-contacts' + qs({ q: x.q.value.trim(), status: x.status.value, source: x.source.value, listId: x.listId.value, tag: x.tag.value.trim() }); };
+      var picked = function () { return $$('.ck:checked').map(function (x) { return x.value; }); };
+      var upd = function () { var n = picked().length; $('#bulk').hidden = !n; $('#bulk-n').textContent = n + ' selected'; };
+      $$('.ck').forEach(function (x) { x.onchange = upd; });
+      var all = $('#ck-all'); if (all) all.onchange = function () { $$('.ck').forEach(function (x) { x.checked = all.checked; }); upd(); };
+      $('#bulk-act').onchange = function (e) {
+        var a = e.target.value; e.target.value = ''; if (!a) return; var ids = picked();
+        var fields = a === 'add_to_list' || a === 'remove_from_list' ? [{ name: 'listId', label: 'List', type: 'select', options: lists.map(function (l) { return [l.id, l.name]; }), required: true }] : a === 'add_tag' || a === 'remove_tag' ? [{ name: 'tag', label: 'Tag', required: true }] : [];
+        if (fields.length && fields[0].options && !lists.length) { toast('Create a list first', true); return; }
+        form({ title: label(a) + ' (' + ids.length + ')', body: a === 'delete' ? 'Contacts and their email history are erased. App users come back on the next sync.' : '', fields: fields, confirm: 'Apply', danger: a === 'delete' || a === 'unsubscribe' }).then(function (v) {
+          if (v) act(post('/admin/mailing/contacts/bulk', Object.assign({ ids: ids, action: a }, v)), 'Done');
+        });
+      };
+      on('mc-sync', function () { post('/admin/mailing/sync-users').then(function (o) { toast(num(o.added) + ' added, ' + num(o.linked) + ' linked (' + num(o.users) + ' app users)'); route(); }).catch(function (e) { toast(e.message, true); }); });
+      on('mc-export', function () { download('/admin/mailing/contacts.csv' + qs({ status: r.q.status }), 'contacts.csv'); });
+      on('mc-add', function () {
+        form({ title: 'Add contact', body: 'Only add people who agreed to hear from RentCreeb.', fields: [{ name: 'email', label: 'Email', type: 'email', required: true }, { name: 'first_name', label: 'First name' }, { name: 'last_name', label: 'Last name' },
+          { name: 'tags', label: 'Tags (comma separated)' }].concat(lists.length ? [{ name: 'listIds', label: 'Add to lists', type: 'checks', options: lists.map(function (l) { return [l.id, l.name]; }) }] : []), confirm: 'Add' })
+          .then(function (v) { if (v) act(post('/admin/mailing/contacts', v), 'Contact added'); });
+      });
+      on('mc-import', function () { importDialog(lists); });
+    }).catch(mailFail);
+  };
+
+  function importDialog(lists) {
+    var text = null;
+    form({ title: 'Import contacts from CSV', wide: true,
+      html: '<p class="muted" style="margin:0">First row must be headers with an <b>email</b> column. Optional: <b>first_name</b>, <b>last_name</b>, <b>tags</b> (separate with ;). Any other column becomes a custom field you can use as <code>{{attributes.column_name}}</code>. Duplicates are merged; unsubscribed, bounced and spam-complaint contacts stay that way.</p>' +
+        '<label class="field"><span>CSV file</span><input class="input" type="file" id="imp-file" accept=".csv,text/csv,.txt"></label><div class="faint" id="imp-info"></div>',
+      fields: (lists.length ? [{ name: 'listId', label: 'Add everyone to list', type: 'select', options: [['', 'No list']].concat(lists.map(function (l) { return [l.id, l.name]; })) }] : []).concat([
+        { name: 'tags', label: 'Tag everyone with (optional)', placeholder: 'e.g. expo-2026' },
+        { name: 'status', label: 'Status', type: 'select', options: [['subscribed', 'Subscribed (they already opted in)'], ['pending', 'Needs to confirm (send nothing until they do)']] },
+        { name: 'updateExisting', label: 'Update names, tags and fields of existing contacts', type: 'checkbox', value: true },
+        { name: 'consent', label: 'I confirm these people agreed to receive emails from RentCreeb', type: 'checkbox' }]), confirm: 'Import' }).then(function (v) {
+      if (!v) return;
+      if (!text) { toast('Choose a CSV file', true); return; }
+      if (!v.consent) { toast('Please confirm consent', true); return; }
+      post('/admin/mailing/contacts/import', { csv: text, listId: v.listId || undefined, tags: v.tags, status: v.status, updateExisting: !!v.updateExisting, consent: true }).then(function (o) {
+        form({ title: 'Import finished', html: kv([['Added', num(o.added)], ['Updated', num(o.updated)], ['Left as they were', num(o.skipped)], ['Invalid emails', num(o.invalid) + (o.invalidSample.length ? '<div class="faint">' + esc(o.invalidSample.join(', ')) + '</div>' : '')]]), confirm: false }).then(route);
+      }).catch(function (e) { toast(e.message, true); });
+    });
+    setTimeout(function () {
+      var f = $('#imp-file'); if (!f) return;
+      f.onchange = function () {
+        var file = f.files && f.files[0]; if (!file) return;
+        if (file.size > 5e6) { toast('File is larger than 5 MB: split it into parts', true); f.value = ''; return; }
+        var rd = new FileReader(); rd.onload = function () { text = String(rd.result || ''); var lines = text.split(/\r?\n/).filter(Boolean).length; $('#imp-info').textContent = file.name + ' · about ' + num(Math.max(0, lines - 1)) + ' rows'; }; rd.readAsText(file);
+      };
+    }, 30);
+  }
+
+  function contactPage(id) {
+    shell('mail-contacts', 'Contact', '');
+    Promise.all([api('/admin/mailing/contacts/' + id), api('/admin/mailing/lists')]).then(function (res) {
+      var j = res[0]; var c = j.contact; var lists = res[1].lists;
+      var on1 = (c.members || []).filter(function (m) { return m.status === 'subscribed'; });
+      shell('mail-contacts', c.email, [c.first_name, c.last_name].filter(Boolean).join(' '));
+      var consent = j.profile ? (j.profile.privacy_prefs && j.profile.privacy_prefs.marketing === true ? badge('allows marketing', 'ok') : badge('marketing off in app', 'grey')) : '';
+      view('<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/mail-contacts">← Contacts</a><button class="btn sm" id="ct-edit">Edit</button>' +
+        (c.status === 'subscribed' ? '<button class="btn sm ghost-danger" id="ct-unsub">Unsubscribe</button>' : c.status === 'unsubscribed' || c.status === 'pending' ? '<button class="btn sm" id="ct-resub">Resubscribe</button>' : '') +
+        '<button class="btn sm ghost-danger" id="ct-del">Delete permanently</button></div><div class="grid cols-2">' +
+        section('Details', kv([['Status', statusBadge(c.status) + ' ' + consent], ['App account', j.profile ? userLink(j.profile) + ' · ' + label(j.profile.role) : 'No'], ['Source', label(c.source)], ['Tags', (c.tags || []).map(function (t) { return badge(t, 'grey'); }).join(' ')],
+          ['Lists', on1.map(function (m) { return esc(m.list && m.list.name); }).join(', ')], ['Custom fields', Object.keys(c.attributes || {}).map(function (k) { return esc(k) + ': ' + esc(c.attributes[k]); }).join('<br>')],
+          ['Added', when(c.created_at)], ['Confirmed', c.confirmed_at ? when(c.confirmed_at) : ''], ['Unsubscribed', c.unsubscribed_at ? when(c.unsubscribed_at) + (c.unsubscribe_reason ? ' · ' + esc(c.unsubscribe_reason) : '') : ''],
+          ['Last opened', c.last_opened_at ? when(c.last_opened_at) : ''], ['Last clicked', c.last_clicked_at ? when(c.last_clicked_at) : '']])) +
+        section('Email history', table(['Email', 'Status', 'Sent', 'Opened', 'Clicked'], j.sends, function (s) {
+          var src = s.campaign ? '<a href="#/mail-campaigns/' + esc(s.campaign.id) + '">' + esc(s.campaign.name) + '</a>' : s.automation ? '<a href="#/mail-automations/' + esc(s.automation.id) + '">' + esc(s.automation.name) + '</a> ' + badge('automation', 'grey') : '—';
+          return '<tr><td>' + src + (s.error ? '<div class="faint">' + esc(s.error) + '</div>' : '') + '</td><td>' + statusBadge(s.status) + '</td><td class="num">' + when(s.sent_at) + '</td><td class="num">' + (s.opened_at ? ago(s.opened_at) : '—') + '</td><td class="num">' + (s.clicked_at ? ago(s.clicked_at) : '—') + '</td></tr>';
+        }, 'Nothing sent yet.')) + '</div>');
+      on('ct-edit', function () {
+        form({ title: 'Edit contact', fields: [{ name: 'first_name', label: 'First name', value: c.first_name }, { name: 'last_name', label: 'Last name', value: c.last_name }, { name: 'tags', label: 'Tags (comma separated)', value: (c.tags || []).join(', ') },
+          { name: 'attrs', label: 'Custom fields (one per line: name = value)', type: 'textarea', value: Object.keys(c.attributes || {}).map(function (k) { return k + ' = ' + c.attributes[k]; }).join('\n') }].concat(lists.length ? [{ name: 'lists', label: 'Lists', type: 'checks', options: lists.map(function (l) { return [l.id, l.name]; }), value: on1.map(function (m) { return m.list_id; }) }] : []), confirm: 'Save' })
+          .then(function (v) {
+            if (!v) return;
+            var attributes = {}; String(v.attrs || '').split('\n').forEach(function (ln) { var i = ln.indexOf('='); if (i > 0) { var k = ln.slice(0, i).trim().toLowerCase().replace(/\s+/g, '_'); if (k) attributes[k] = ln.slice(i + 1).trim(); } });
+            var was = on1.map(function (m) { return m.list_id; }); var now = v.lists || was;
+            var jobs = [api('/admin/mailing/contacts/' + id, { method: 'PATCH', body: { first_name: v.first_name || null, last_name: v.last_name || null, tags: v.tags || '', attributes: attributes } })];
+            now.filter(function (x) { return was.indexOf(x) < 0; }).forEach(function (l) { jobs.push(post('/admin/mailing/contacts/bulk', { ids: [id], action: 'add_to_list', listId: l })); });
+            was.filter(function (x) { return now.indexOf(x) < 0; }).forEach(function (l) { jobs.push(post('/admin/mailing/contacts/bulk', { ids: [id], action: 'remove_from_list', listId: l })); });
+            act(Promise.all(jobs), 'Saved');
+          });
+      });
+      on('ct-unsub', function () { act(api('/admin/mailing/contacts/' + id, { method: 'PATCH', body: { status: 'unsubscribed' } }), 'Unsubscribed'); });
+      on('ct-resub', function () { form({ title: 'Resubscribe?', body: 'Only do this if they asked to be subscribed again.', confirm: 'Resubscribe' }).then(function (v) { if (v) act(api('/admin/mailing/contacts/' + id, { method: 'PATCH', body: { status: 'subscribed' } }), 'Subscribed'); }); });
+      on('ct-del', function () { form({ title: 'Delete ' + c.email + '?', body: 'Erases the contact and their email history (for data-deletion requests).', confirm: 'Delete', danger: true }).then(function (v) { if (v) api('/admin/mailing/contacts/' + id, { method: 'DELETE' }).then(function () { toast('Deleted'); location.hash = '#/mail-contacts'; }).catch(function (e) { toast(e.message, true); }); }); });
+    }).catch(mailFail);
+  }
+
+  // ── lists & sign-up form ──
+  PAGES['mail-lists'] = function () {
+    shell('mail-lists', 'Lists & sign-up form', 'Group contacts, and let people join from your website.', '<button class="btn primary" id="ml-add">New list</button>');
+    var listForm = function (l) {
+      l = l || {};
+      return form({ title: l.id ? 'Edit list' : 'New list', fields: [{ name: 'name', label: 'Name', value: l.name, required: true }, { name: 'description', label: 'Description (shown on the preferences page)', type: 'textarea', value: l.description },
+        { name: 'is_public', label: 'Public: people can join it from the sign-up form and choose it on their preferences page', type: 'checkbox', value: !!l.is_public },
+        { name: 'double_opt_in', label: 'Double opt-in: sign-ups must confirm by email first (recommended)', type: 'checkbox', value: l.double_opt_in !== false }], confirm: 'Save' });
+    };
+    api('/admin/mailing/lists').then(function (j) {
+      view('<div class="card">' + table(['List', 'Subscribers', 'Visibility', ''], j.lists, function (l) {
+        return '<tr><td><b>' + esc(l.name) + '</b><div class="faint">' + esc(l.description || '') + '</div></td><td class="num"><a href="#/mail-contacts?listId=' + esc(l.id) + '">' + num(l.members) + '</a></td>' +
+          '<td>' + (l.is_public ? badge('public', 'ok') : badge('private', 'grey')) + (l.double_opt_in ? ' ' + badge('double opt-in', 'grey') : '') + '</td>' +
+          '<td><div class="row" style="justify-content:flex-end">' + (l.is_public ? '<button class="btn sm" data-embed="' + esc(l.id) + '">Sign-up form code</button>' : '') + '<button class="btn sm" data-edit="' + esc(l.id) + '">Edit</button><button class="btn sm ghost-danger" data-del="' + esc(l.id) + '">Delete</button></div></td></tr>';
+      }, 'No lists yet. Lists are optional: you can always email everyone or filter by role and tags.') + '</div>' +
+        '<div class="card stack" style="margin-top:14px"><h3>Sign-up form for your website</h3><p class="muted" style="margin:0">Paste this anywhere on rentcreeb.com. New sign-ups confirm by email, then join as subscribed contacts (and the list, if you pick a public one).</p>' +
+        '<textarea class="input code" readonly rows="9" id="embed-any">' + esc(embedCode(null)) + '</textarea></div>');
+      on('ml-add', function () { listForm().then(function (v) { if (v) act(post('/admin/mailing/lists', Object.assign(v, { is_public: !!v.is_public, double_opt_in: !!v.double_opt_in })), 'List created'); }); });
+      bind('[data-edit]', function (id) { var l = j.lists.filter(function (x) { return x.id === id; })[0]; listForm(l).then(function (v) { if (v) act(api('/admin/mailing/lists/' + id, { method: 'PATCH', body: Object.assign(v, { is_public: !!v.is_public, double_opt_in: !!v.double_opt_in }) }), 'Saved'); }); });
+      bind('[data-del]', function (id) { form({ title: 'Delete this list?', body: 'Contacts stay; they are just no longer grouped in this list.', confirm: 'Delete', danger: true }).then(function (v) { if (v) act(api('/admin/mailing/lists/' + id, { method: 'DELETE' }), 'Deleted'); }); });
+      bind('[data-embed]', function (id) { form({ title: 'Sign-up form code', html: '<textarea class="input code" readonly rows="10">' + esc(embedCode(id)) + '</textarea>', wide: true, confirm: false }); });
+    }).catch(mailFail);
+  };
+  function embedCode(listId) {
+    return '<form action="' + location.origin + '/mail/subscribe" method="post">\n' + (listId ? '  <input type="hidden" name="listId" value="' + listId + '">\n' : '') +
+      '  <input type="text" name="firstName" placeholder="First name">\n  <input type="email" name="email" placeholder="Email address" required>\n' +
+      '  <input type="text" name="company" style="display:none" tabindex="-1" autocomplete="off">\n  <button type="submit">Subscribe</button>\n</form>';
+  }
+
+  // ── templates ──
+  PAGES['mail-templates'] = function () {
+    shell('mail-templates', 'Templates', 'Reusable email designs. Load one into a campaign or automation.', '<button class="btn primary" id="mt-add">New template</button>');
+    var tplForm = function (t) {
+      t = t || {};
+      return form({ title: t.id ? 'Edit template' : 'New template', wide: true, fields: [{ name: 'name', label: 'Name', value: t.name, required: true }, { name: 'subject', label: 'Subject line', value: t.subject }, { name: 'preheader', label: 'Preview text', value: t.preheader },
+        { name: 'html', label: 'Body (plain text or HTML; personalisation like {{first_name|there}} works)', type: 'textarea', value: t.html || STARTER }], confirm: 'Save' });
+    };
+    api('/admin/mailing/templates').then(function (j) {
+      view('<div class="card">' + table(['Template', 'Subject', 'Updated', ''], j.templates, function (t) {
+        return '<tr><td><b>' + esc(t.name) + '</b></td><td>' + esc(t.subject || '') + '</td><td class="num">' + ago(t.updated_at) + '</td><td><div class="row" style="justify-content:flex-end"><button class="btn sm" data-prev="' + esc(t.id) + '">Preview</button><button class="btn sm" data-use="' + esc(t.id) + '">New campaign from it</button><button class="btn sm" data-edit="' + esc(t.id) + '">Edit</button><button class="btn sm ghost-danger" data-del="' + esc(t.id) + '">Delete</button></div></td></tr>';
+      }, 'No templates yet. Save one from the campaign editor, or create one here.') + '</div>');
+      var byId = function (id) { return j.templates.filter(function (x) { return x.id === id; })[0]; };
+      on('mt-add', function () { tplForm().then(function (v) { if (v) act(post('/admin/mailing/templates', v), 'Template saved'); }); });
+      bind('[data-edit]', function (id) { tplForm(byId(id)).then(function (v) { if (v) act(api('/admin/mailing/templates/' + id, { method: 'PATCH', body: v }), 'Saved'); }); });
+      bind('[data-del]', function (id) { form({ title: 'Delete this template?', confirm: 'Delete', danger: true }).then(function (v) { if (v) act(api('/admin/mailing/templates/' + id, { method: 'DELETE' }), 'Deleted'); }); });
+      bind('[data-prev]', function (id) { var t = byId(id); post('/admin/mailing/preview', { subject: t.subject, preheader: t.preheader, html: t.html }).then(function (p) { form({ title: p.subject, html: '<iframe class="preview tall" sandbox="" title="Preview" id="v-frame"></iframe>', wide: true, confirm: false }); $('#v-frame').srcdoc = p.html; }).catch(function (e) { toast(e.message, true); }); });
+      bind('[data-use]', function (id) { var t = byId(id); post('/admin/mailing/campaigns', { name: t.name, subject: t.subject, preheader: t.preheader, html: t.html }).then(function (c) { location.hash = '#/mail-campaigns/' + c.campaign.id; }).catch(function (e) { toast(e.message, true); }); });
+    }).catch(mailFail);
+  };
+
+  // ── automations ──
+  var TRIGGERS = [['user_signup', 'Someone creates a RentCreeb account'], ['contact_added', 'A new outside contact is added (import, sign-up form, by hand)'], ['list_joined', 'Someone joins a list']];
+  function delayText(h) { return !h ? 'straight away' : h % 24 ? h + ' hour' + (h > 1 ? 's' : '') + ' later' : h / 24 + ' day' + (h > 24 ? 's' : '') + ' later'; }
+  PAGES['mail-automations'] = function (r) {
+    if (r.path[1]) return automationPage(r.path[1]);
+    shell('mail-automations', 'Automations', 'Emails that send themselves: welcome series, onboarding tips, follow-ups.', '<a class="btn primary" href="#/mail-automations/new">New automation</a>');
+    api('/admin/mailing/automations').then(function (j) {
+      var trig = {}; TRIGGERS.forEach(function (t) { trig[t[0]] = t[1]; });
+      view('<div class="card">' + table(['Automation', 'When', 'Sent', 'Opened', 'Status', ''], j.automations, function (a) {
+        return '<tr><td class="click" data-go="#/mail-automations/' + esc(a.id) + '"><b>' + esc(a.name) + '</b><div class="faint">' + esc(a.subject) + '</div></td>' +
+          '<td>' + esc(trig[a.trigger] || a.trigger) + (a.list ? ' (' + esc(a.list.name) + ')' : '') + (a.roles && a.roles.length ? '<div class="faint">' + esc(a.roles.join(', ')) + '</div>' : '') + '<div class="faint">' + esc(delayText(a.delay_hours)) + '</div></td>' +
+          '<td class="num">' + num(a.stats.sent) + (a.stats.queued ? '<div class="faint">' + num(a.stats.queued) + ' waiting</div>' : '') + '</td><td class="num">' + pct(a.stats.openRate) + '</td>' +
+          '<td>' + (a.active ? badge('running', 'ok') : badge('off', 'grey')) + '</td><td><button class="btn sm' + (a.active ? '' : ' primary') + '" data-tog="' + esc(a.id) + '" data-on="' + (a.active ? '1' : '') + '">' + (a.active ? 'Switch off' : 'Switch on') + '</button></td></tr>';
+      }, 'No automations yet. A welcome email for new accounts is a good first one.') + '</div><p class="faint">Automations only reach people who trigger them after they are switched on. Chain several (e.g. day 0, day 3, day 7) for a series.</p>');
+      bindGo();
+      bind('[data-tog]', function (id, el) { act(api('/admin/mailing/automations/' + id, { method: 'PATCH', body: { active: !el.dataset.on } }), el.dataset.on ? 'Switched off' : 'Running'); });
+    }).catch(mailFail);
+  };
+  function automationPage(id) {
+    shell('mail-automations', id === 'new' ? 'New automation' : 'Automation', '');
+    Promise.all([id === 'new' ? Promise.resolve(null) : api('/admin/mailing/automations').then(function (j) { return j.automations.filter(function (a) { return a.id === id; })[0] || null; }), api('/admin/mailing/lists'), api('/admin/mailing/overview')]).then(function (res) {
+      var a = res[0] || { name: 'Welcome email', trigger: 'user_signup', delay_hours: 0, kind: 'marketing', roles: [], subject: 'Welcome to RentCreeb, {{first_name|there}}', html: STARTER };
+      if (id !== 'new' && !res[0]) return view('<div class="err">Automation not found.</div>');
+      var lists = res[1].lists;
+      shell('mail-automations', id === 'new' ? 'New automation' : a.name, a.active ? 'Running. Changes apply to emails not sent yet.' : 'Off');
+      var unit = a.delay_hours && a.delay_hours % 24 === 0 ? 'days' : 'hours'; var amount = unit === 'days' ? a.delay_hours / 24 : a.delay_hours;
+      view(mailNotReady(res[2].status) + '<div class="row" style="margin-bottom:12px"><a class="btn sm" href="#/mail-automations">← Automations</a>' + (id !== 'new' ? '<button class="btn sm ghost-danger" id="au-del">Delete</button>' : '') + '</div>' +
+        '<div class="card stack"><div class="grid cols-2 tight"><label class="field"><span>Name</span><input class="input" id="au-name" value="' + esc(a.name) + '"></label>' +
+        '<label class="field"><span>Type</span><select class="input" id="au-kind"><option value="marketing"' + (a.kind === 'marketing' ? ' selected' : '') + '>Marketing (needs consent)</option><option value="service"' + (a.kind === 'service' ? ' selected' : '') + '>Service (account onboarding)</option></select></label>' +
+        '<label class="field"><span>Starts when</span><select class="input" id="au-trigger">' + TRIGGERS.map(function (t) { return '<option value="' + t[0] + '"' + (a.trigger === t[0] ? ' selected' : '') + '>' + esc(t[1]) + '</option>'; }).join('') + '</select></label>' +
+        '<label class="field" id="au-list-wrap"><span>List</span><select class="input" id="au-list"><option value="">Pick a list</option>' + lists.map(function (l) { return '<option value="' + esc(l.id) + '"' + (a.list_id === l.id ? ' selected' : '') + '>' + esc(l.name) + '</option>'; }).join('') + '</select></label>' +
+        '<div class="field"><span>Send it</span><div class="row"><input class="input" id="au-amount" type="number" min="0" max="365" value="' + esc(amount) + '" style="width:90px"><select class="input" id="au-unit"><option value="hours"' + (unit === 'hours' ? ' selected' : '') + '>hours</option><option value="days"' + (unit === 'days' ? ' selected' : '') + '>days</option></select><span class="faint">after it starts (0 = straight away)</span></div></div></div>' +
+        '<div class="field" id="au-roles-wrap"><span>Only for these roles <span class="faint">(none = everyone)</span></span><div class="checks">' + ROLE_OPTS.map(function (o) { return '<label class="check"><input type="checkbox" name="au-role" value="' + o[0] + '"' + ((a.roles || []).indexOf(o[0]) >= 0 ? ' checked' : '') + '><span>' + o[1] + '</span></label>'; }).join('') + '</div></div></div>' +
+        section('Content', contentEditor(a)) +
+        '<div class="card row between sticky-bar"><span class="faint">' + (a.active ? badge('running', 'ok') : badge('off', 'grey')) + '</span><div class="row"><button class="btn" id="au-test">Send test</button><button class="btn" id="au-save">Save</button>' +
+        (a.active ? '<button class="btn" id="au-off">Switch off</button>' : '<button class="btn primary" id="au-on">Save &amp; switch on</button>') + '</div></div>');
+      var sync = function () { var t = $('#au-trigger').value; $('#au-list-wrap').hidden = t !== 'list_joined'; $('#au-roles-wrap').hidden = t !== 'user_signup'; };
+      $('#au-trigger').onchange = sync; sync();
+      var kindOf = function () { return $('#au-kind').value; };
+      var refresh = bindEditor(kindOf); $('#au-kind').onchange = refresh;
+      var body = function () {
+        var n = Math.max(0, Number($('#au-amount').value) || 0);
+        return Object.assign({ name: $('#au-name').value.trim() || 'Automation', kind: kindOf(), trigger: $('#au-trigger').value, list_id: $('#au-list').value || null,
+          roles: $$('input[name="au-role"]:checked').map(function (x) { return x.value; }), delay_hours: Math.round($('#au-unit').value === 'days' ? n * 24 : n) }, readContent());
+      };
+      var save = function (extra) {
+        var b = Object.assign(body(), extra || {});
+        var p = id === 'new' ? post('/admin/mailing/automations', b).then(function (j) { return extra && extra.active ? api('/admin/mailing/automations/' + j.automation.id, { method: 'PATCH', body: { active: true } }).then(function () { return j; }) : j; })
+          : api('/admin/mailing/automations/' + id, { method: 'PATCH', body: b });
+        return p.then(function (j) { toast(extra && extra.active ? 'Saved and running' : 'Saved'); if (id === 'new') location.hash = '#/mail-automations/' + j.automation.id; else route(); }).catch(function (e) { toast(e.message, true); });
+      };
+      on('au-save', function () { save(); });
+      on('au-on', function () { form({ title: 'Switch on?', body: 'People who trigger it from now on get this email ' + delayText(body().delay_hours) + '. Nobody from before is back-sent.', confirm: 'Switch on' }).then(function (v) { if (v) save({ active: true }); }); });
+      on('au-off', function () { save({ active: false }); });
+      on('au-test', function () {
+        form({ title: 'Send a test', fields: [{ name: 'to', label: 'Send to', value: me.email || '', required: true }], confirm: 'Send test' }).then(function (v) {
+          if (v) post('/admin/mailing/test', Object.assign(readContent(), { kind: kindOf(), to: splitTags(v.to).slice(0, 5) })).then(function () { toast('Test sent'); }).catch(function (e) { toast(e.message, true); });
+        });
+      });
+      on('au-del', function () { form({ title: 'Delete this automation?', body: 'Its history is deleted too.', confirm: 'Delete', danger: true }).then(function (v) { if (v) api('/admin/mailing/automations/' + id, { method: 'DELETE' }).then(function () { toast('Deleted'); location.hash = '#/mail-automations'; }).catch(function (e) { toast(e.message, true); }); }); });
+    }).catch(mailFail);
+  }
 
   // Keep nav badges fresh without reloading everything.
   setInterval(function () {

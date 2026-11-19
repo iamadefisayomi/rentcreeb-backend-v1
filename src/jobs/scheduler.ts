@@ -4,6 +4,7 @@ import { logger } from '../lib/logger';
 import { notify } from '../services/notify';
 import { purgeVerificationEvidence } from '../services/verificationEvidence';
 import { reviewPendingListings } from '../services/listingReview';
+import { processMailQueue } from '../services/mailing';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
@@ -12,6 +13,9 @@ import { reviewPendingListings } from '../services/listingReview';
 export function startScheduler() {
   // Every minute: AI + rule review of listings waiting for approval (auto-approves the ones that fully pass).
   cron.schedule('* * * * *', () => { void reviewPendingListings(); });
+
+  // Every minute: mailing list queue (scheduled campaigns, automations, rate-limited delivery).
+  cron.schedule('* * * * *', () => { void processMailQueue(); });
 
   // Every 10 min: expire unpaid bookings and stale OTPs. An unpaid booking can be paid later from My Bookings or the
   // property page for up to 24 hours, but never closer than 2 hours to the inspection (same rule as booking it).

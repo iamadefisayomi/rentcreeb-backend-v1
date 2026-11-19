@@ -53,6 +53,14 @@ const schema = z.object({
   EMAIL_FROM: z.string().default('RentCreeb <no-reply@rentcreeb.com>'),
   /** Inbox that receives Contact Support / Report a Bug submissions (optional; tickets are always stored). */
   SUPPORT_EMAIL: z.string().email().optional(),
+  /** Public address of this API (links in emails: unsubscribe, tracking). Render sets RENDER_EXTERNAL_URL itself. */
+  API_PUBLIC_URL: z.string().url().optional().transform((u) => (u ?? process.env.RENDER_EXTERNAL_URL)?.replace(/\/+$/, '')),
+  /** Resend → Webhooks signing secret (whsec_…): delivery, bounce, complaint, open and click events. */
+  RESEND_WEBHOOK_SECRET: z.string().optional(),
+  /** Postal address shown in the footer of marketing emails (anti-spam laws require one). */
+  MAIL_COMPANY_ADDRESS: z.string().default('RentCreeb, Lagos, Nigeria'),
+  /** Mailing list send speed. Resend's default limit is 2 API calls/second; each batch call carries up to 100 emails. */
+  MAIL_SENDS_PER_MINUTE: z.coerce.number().int().min(1).max(6000).default(600),
 
   /** VAT shown (as included in the price) on RentCreeb's own fees: subscriptions and inspection fees. 0 hides the line. */
   VAT_PCT: z.coerce.number().min(0).max(50).default(7.5),

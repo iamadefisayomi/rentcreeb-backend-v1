@@ -111,6 +111,8 @@ export function mountPlatform(r: Router) {
           ['013 runtime settings', probe('app_settings', 'key')],
           ['013 announcements', probe('announcements')],
           ['014 listing AI review', probe('properties', 'ai_review')],
+          ['018 support chat', probe('support_tickets', 'conversation_id')],
+          ['018 mailing list', probe('mailing_contacts')],
         ];
         return Promise.all(checks.map(async ([name, p]) => ({ name, applied: await p })));
       })(),

@@ -6,6 +6,7 @@ import { signPrivateUrl } from '../../lib/bunny';
 import { paginate, uuid } from '../../lib/common';
 import { notify } from '../../services/notify';
 import { PERSON, audit, count, decision, like, notesFor } from './shared';
+import { ensureTicketConversation, postStaffReply, setTicketStatus, type Ticket } from '../../services/supportChat';
 import { liveListingReviews, queueListingReview, reviewListing } from '../../services/listingReview';
 
 /** Run a query with the private AI review embedded; without it if migration 015 isn't applied yet. */
@@ -219,23 +220,67 @@ export function mountContent(r: Router) {
   // ───────── Support tickets ─────────
   r.get('/tickets', async (req, res) => {
     const { from, to } = paginate(req.query);
-    const f = z.object({ status: z.string().optional(), kind: z.string().optional(), q: z.string().optional() }).parse(req.query);
-    let q = db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON})`, { count: 'exact' }).order('created_at', { ascending: false }).range(from, to);
+    const f = z.object({ status: z.string().optional(), kind: z.string().optional(), q: z.string().optional(), awaiting: z.enum(['staff', 'user']).optional() }).parse(req.query);
+    // Newest activity first, so a user's reply brings their ticket back to the top.
+    let q = db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON})`, { count: 'exact' })
+      .order('last_message_at', { ascending: false, nullsFirst: false }).order('created_at', { ascending: false }).range(from, to);
     if (f.status) q = q.eq('status', f.status);
+    if (f.awaiting) q = q.eq('awaiting', f.awaiting);
     if (f.kind) q = q.eq('kind', f.kind);
     if (f.q?.trim()) { const t = like(f.q); q = q.or(`subject.ilike.${t},message.ilike.${t}`); }
     const { data, count: total, error } = await q;
     if (error) throw dbError(error);
     res.json({ tickets: data, total: total ?? 0 });
   });
+  /** One ticket with its chat thread (support threads are part of the job, so opening one is not audited like private chats). */
+  r.get('/tickets/:id', async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const t = unwrapMaybe(await db.from('support_tickets').select(`*, user:profiles!support_tickets_user_id_fkey(${PERSON}, created_at, is_suspended)`).eq('id', id).maybeSingle());
+    if (!t) throw notFound('Ticket not found');
+    const conversationId = await ensureTicketConversation(t as Ticket);
+    const [{ data: msgs, error }, { data: conv }, others, notes] = await Promise.all([
+      db.from('messages').select('id, sender_id, body, system, attachment_url, attachment_path, attachment_name, attachment_type, created_at, read_at').eq('conversation_id', conversationId).order('created_at').limit(2000),
+      db.from('conversations').select('closed_at').eq('id', conversationId).maybeSingle(),
+      db.from('support_tickets').select('id, subject, status, created_at').eq('user_id', (t as any).user_id).neq('id', id).order('created_at', { ascending: false }).limit(10),
+      notesFor('ticket', id),
+    ]);
+    if (error) throw dbError(error);
+    const staffIds = [...new Set((msgs ?? []).map((m: any) => m.sender_id).filter((s: string) => s !== (t as any).user_id))];
+    const { data: staff } = staffIds.length ? await db.from('profiles').select('id, first_name, last_name').in('id', staffIds) : { data: [] as any[] };
+    // Opening the thread counts as reading what the user sent.
+    await db.from('messages').update({ read_at: new Date().toISOString() }).eq('conversation_id', conversationId).eq('sender_id', (t as any).user_id).is('read_at', null);
+    res.json({
+      ticket: { ...t, conversation_id: conversationId }, closed: !!conv?.closed_at, otherTickets: others.data ?? [], notes, staff: staff ?? [],
+      messages: (msgs ?? []).map((m: any) => {
+        let attachment: string | null = m.attachment_url ?? null;
+        if (!attachment && m.attachment_path) { try { attachment = signPrivateUrl(m.attachment_path, 3600); } catch { attachment = null; } }
+        return { id: m.id, sender_id: m.sender_id, staff: m.sender_id !== (t as any).user_id, system: !!m.system, body: m.body, attachment, attachment_name: m.attachment_name, attachment_type: m.attachment_type, created_at: m.created_at, read_at: m.read_at };
+      }),
+    });
+  });
+  /** Answer in the thread. Optional status change in the same step (e.g. reply and resolve, reply and close). */
+  r.post('/tickets/:id/messages', async (req, res) => {
+    const b = z.object({ body: z.string().trim().min(1).max(4000), status: z.enum(['open', 'in_progress', 'resolved', 'closed']).optional() }).parse(req.body);
+    const t = unwrapMaybe(await db.from('support_tickets').select('*').eq('id', uuid.parse(req.params.id)).maybeSingle()) as Ticket | null;
+    if (!t) throw notFound('Ticket not found');
+    const message = await postStaffReply(t, req.user.id, b.body);
+    if (b.status && b.status !== 'in_progress') await setTicketStatus({ ...t, status: t.status === 'open' ? 'in_progress' : t.status }, req.user.id, b.status);
+    await audit(req, 'ticket.reply', 'ticket', t.id, { length: b.body.length, ...(b.status ? { status: b.status } : {}) });
+    res.status(201).json({ message });
+  });
   r.patch('/tickets/:id', async (req, res) => {
-    const b = z.object({ status: z.enum(['open', 'in_progress', 'resolved', 'closed']), adminNote: z.string().max(2000).optional(), notifyUser: z.boolean().default(true) }).parse(req.body);
-    const t = unwrap(await db.from('support_tickets').update({ status: b.status, admin_note: b.adminNote, updated_at: new Date().toISOString() }).eq('id', uuid.parse(req.params.id)).select().single());
-    if (b.notifyUser && (b.status === 'resolved' || b.adminNote)) {
-      await notify(t.user_id, 'support_update', b.status === 'resolved' ? 'Your request was resolved' : 'Update on your request', b.adminNote?.slice(0, 160) ?? t.subject);
-    }
-    await audit(req, `ticket.${b.status}`, 'ticket', t.id, b.adminNote ? { note: b.adminNote } : {});
-    res.json({ ticket: t });
+    const b = z.object({ status: z.enum(['open', 'in_progress', 'resolved', 'closed']).optional(), assignedTo: z.string().uuid().nullable().optional(),
+      adminNote: z.string().trim().max(2000).optional(), notifyUser: z.boolean().default(true) }).parse(req.body);
+    const id = uuid.parse(req.params.id);
+    const t = unwrapMaybe(await db.from('support_tickets').select('*').eq('id', id).maybeSingle()) as Ticket | null;
+    if (!t) throw notFound('Ticket not found');
+    // Old dashboard flow: a note "sent to the user" is now a reply in their thread.
+    if (b.adminNote && b.notifyUser) await postStaffReply(t, req.user.id, b.adminNote);
+    if (b.status) await setTicketStatus(b.adminNote && b.notifyUser && t.status === 'open' ? { ...t, status: 'in_progress' } : t, req.user.id, b.status);
+    if (b.assignedTo !== undefined) await db.from('support_tickets').update({ assigned_to: b.assignedTo }).eq('id', id);
+    if (b.adminNote && !b.notifyUser) await db.from('support_tickets').update({ admin_note: b.adminNote }).eq('id', id);
+    await audit(req, `ticket.${b.status ?? 'update'}`, 'ticket', id, b.adminNote ? { note: b.adminNote } : {});
+    res.json({ ticket: unwrap(await db.from('support_tickets').select('*').eq('id', id).single()) });
   });
 
   // ───────── App feedback ("Rate RentCreeb") ─────────
