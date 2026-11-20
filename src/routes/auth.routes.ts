@@ -231,15 +231,28 @@ r.post('/oauth/finish', async (req, res) => {
   const full = String(meta.full_name ?? meta.name ?? '').trim();
   const first = meta.given_name ?? meta.first_name ?? (full ? full.split(/\s+/)[0] : null);
   const last = meta.family_name ?? meta.last_name ?? (full.includes(' ') ? full.split(/\s+/).slice(1).join(' ') : null);
-  const { data: existing } = await db.from('profiles').select('*').eq('id', u.id).maybeSingle();
-  if (!existing) throw unauthorized('Your account could not be created. Please try again.');
+  let { data: existing } = await db.from('profiles').select('*').eq('id', u.id).maybeSingle();
+  // A login whose profile is missing (e.g. removed by hand) gets a fresh one, as the sign-up trigger would have made.
+  let repaired = false;
+  if (!existing) {
+    const role = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent'].includes(meta.role) ? meta.role : 'tenant';
+    const ins = await db.from('profiles').insert({ id: u.id, email: u.email ?? null, first_name: first, last_name: last, role, avatar_url: meta.avatar_url ?? meta.picture ?? null }).select('*').single();
+    if (ins.error) {
+      logger.error({ err: ins.error, userId: u.id }, 'oauth: could not recreate missing profile');
+      throw unauthorized('Your account could not be created. Please try again.');
+    }
+    await db.from('wallets').upsert({ user_id: u.id }, { onConflict: 'user_id', ignoreDuplicates: true });
+    existing = ins.data;
+    repaired = true;
+    logger.warn({ userId: u.id }, 'oauth: recreated a missing profile');
+  }
   const patch: Record<string, unknown> = {};
   if (!existing.first_name && first) patch.first_name = first;
   if (!existing.last_name && last) patch.last_name = last;
   if (!existing.avatar_url && (meta.avatar_url || meta.picture)) patch.avatar_url = meta.avatar_url ?? meta.picture;
   if (!existing.email && u.email) patch.email = u.email;
   const profile = Object.keys(patch).length ? unwrap(await db.from('profiles').update(patch).eq('id', u.id).select('*').single()) : existing;
-  const isNewUser = Date.now() - Date.parse(u.created_at) < 5 * 60 * 1000 && !profile.onboarding_completed;
+  const isNewUser = (repaired || Date.now() - Date.parse(u.created_at) < 5 * 60 * 1000) && !profile.onboarding_completed;
   // Google accounts created on the website: Google confirmed the email, which counts instead of a phone code there.
   if (isNewUser && b.source === "website" && !meta.signup_source) await db.auth.admin.updateUserById(u.id, { user_metadata: { ...meta, signup_source: "website" } });
   res.json({
