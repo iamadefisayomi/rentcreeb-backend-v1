@@ -44,7 +44,7 @@ r.get('/verify/:reference', async (req, res) => {
 r.get('/', async (req, res) => {
   const { page, limit, from, to } = paginate(req.query);
   const purpose = typeof req.query.purpose === 'string' ? req.query.purpose.split(',') : null;
-  let q = db.from('payments').select('id, purpose, reference, amount_kobo, status, channel, paid_at, created_at, booking_id, tenancy_id, job_id, rentsave_plan_id, bookings(properties(title))', { count: 'exact' })
+  let q = db.from('payments').select('id, purpose, reference, amount_kobo, status, channel, paid_at, created_at, booking_id, tenancy_id, job_id, rentsave_plan_id, bookings(properties(title), host:profiles!bookings_host_id_fkey(first_name, last_name))', { count: 'exact' })
     .eq('user_id', req.user.id).order('created_at', { ascending: false }).range(from, to);
   if (purpose) q = q.in('purpose', purpose);
   const { data, count } = await q;
@@ -61,6 +61,8 @@ r.get('/', async (req, res) => {
   const jobTitle = new Map((jobs.data ?? []).map((j: any) => [j.id, j.title]));
   const payments = rows.map(({ bookings, ...p }) => ({
     ...p,
+    // Who the payment went to (the agent for an inspection), for the website's transaction cards.
+    counterparty: bookings?.host ? `${bookings.host.first_name ?? ''} ${bookings.host.last_name ?? ''}`.trim() || null : null,
     subtitle: bookings?.properties?.title ?? (p.tenancy_id ? tenTitle.get(p.tenancy_id) : null) ?? (p.job_id ? jobTitle.get(p.job_id) : null) ?? (p.purpose === 'rentsave' ? 'RentSave wallet' : null),
   }));
 
@@ -91,11 +93,11 @@ const PURPOSE: Record<string, string> = { inspection: 'Inspection fee', rent: 'R
 /** What the payment was for, who it went to, and whether the money is still held in escrow (Figma Transaction Detail 4508:9319). */
 async function receiptContext(p: any) {
   const ctx: { title: string; description: string | null; counterparty: string | null; counterpartyRole: string | null; property: { id: string; title: string; address: string } | null;
-    escrow: { status: string; feeKobo: number; netKobo: number; releasedAt: string | null } | null; links: Record<string, string> } = {
+    escrow: { status: string; feeKobo: number; netKobo: number; releasedAt: string | null } | null; links: Record<string, string>; bookingStatus?: string } = {
     title: PURPOSE[p.purpose] ?? p.purpose, description: null, counterparty: null, counterpartyRole: null, property: null, escrow: null, links: {} };
   if (p.booking_id) {
-    const { data: b } = await db.from('bookings').select('id, scheduled_at, properties(id, title, address), host:profiles!bookings_host_id_fkey(first_name, last_name)').eq('id', p.booking_id).maybeSingle();
-    if (b) { const x: any = b; ctx.property = x.properties; ctx.counterparty = who(x.host); ctx.counterpartyRole = 'Agent'; ctx.description = `Inspection on ${new Date(x.scheduled_at).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}`; ctx.links.bookingId = b.id; }
+    const { data: b } = await db.from('bookings').select('id, status, scheduled_at, properties(id, title, address), host:profiles!bookings_host_id_fkey(first_name, last_name)').eq('id', p.booking_id).maybeSingle();
+    if (b) { const x: any = b; ctx.bookingStatus = x.status; ctx.property = x.properties; ctx.counterparty = who(x.host); ctx.counterpartyRole = 'Agent'; ctx.description = `Inspection on ${new Date(x.scheduled_at).toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' })}`; ctx.links.bookingId = b.id; }
   }
   if (p.tenancy_id) {
     const { data: t } = await db.from('tenancies').select('id, unit_label, properties(id, title, address), landlord:profiles!tenancies_landlord_id_fkey(first_name, last_name)').eq('id', p.tenancy_id).maybeSingle();

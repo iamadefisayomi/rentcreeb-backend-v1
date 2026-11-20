@@ -28,7 +28,15 @@ r.get('/agent/:agentId', async (req, res) => res.json(await list('agent_id', req
 /** Reviews received by the logged-in agent/landlord (for responding). */
 r.get('/received', authenticate, requireRole('agent', 'landlord', 'estate_manager'), async (req, res) =>
   // Agent "My Reviews" (Figma 4549:326) also shows the property and whether a review has been flagged.
-  res.json(await list('agent_id', req.user.id, req.query, `${SELECT}, flag_count, properties(title, area)`)));
+  res.json(await list('agent_id', req.user.id, req.query, `${SELECT}, flag_count, properties(id, title, area, slug, property_media(url, position))`)));
+
+/** Reviews I wrote (website dashboard → Reviews for renters). */
+r.get('/mine', authenticate, async (req, res) => {
+  const { from, to, page, limit } = paginate(req.query);
+  const { data, count } = await db.from('reviews').select(`${SELECT}, properties(id, title, area, slug, property_media(url, position))`, { count: 'exact' })
+    .eq('reviewer_id', req.user.id).order('created_at', { ascending: false }).range(from, to);
+  res.json({ reviews: data ?? [], total: count ?? 0, page, limit });
+});
 
 /** Only verified tenants who completed an inspection of that property can review. */
 r.post('/', authenticate, requireRole('tenant'), requireVerified, async (req, res) => {

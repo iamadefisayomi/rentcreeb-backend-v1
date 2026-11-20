@@ -147,6 +147,18 @@ r.post('/auth/change-email/confirm', async (req, res) => {
   res.json({ profile: unwrap(await db.from('profiles').select('*').eq('id', t.userId).single()), session });
 });
 
+/** Google-only accounts can add a password (Account → Password). Accounts that already have one change it with the current password. */
+r.post('/auth/set-password', authenticate, async (req, res) => {
+  const { password } = z.object({ password: passwordSchema }).parse(req.body);
+  const { data } = await db.auth.admin.getUserById(req.user.id);
+  const hasPassword = (data.user?.identities ?? []).some((i) => i.provider === 'email')
+    || !!(await db.from('legacy_credentials').select('user_id').eq('user_id', req.user.id).maybeSingle()).data;
+  if (hasPassword) throw badRequest('Your account already has a password. Use "Change password" instead.', 'HAS_PASSWORD');
+  const { error } = await db.auth.admin.updateUserById(req.user.id, { password });
+  if (error) throw badRequest(error.message);
+  res.json({ status: true });
+});
+
 // ── Linked sign-in methods (Account → Connected accounts) ──
 r.get('/auth/accounts', authenticate, async (req, res) => {
   const { data } = await db.auth.admin.getUserById(req.user.id);

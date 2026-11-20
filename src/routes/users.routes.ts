@@ -81,13 +81,15 @@ r.delete('/me', authenticate, async (req, res) => {
 
 /** Settings → Notification Settings. Returns the full resolved map (defaults + saved overrides). */
 r.get('/me/notification-prefs', authenticate, async (req, res) => {
-  res.json({ prefs: resolvePrefs((req.user as any).notification_prefs) });
+  // `web`: the website's own toggles (kept as they were set; the matching ones also set the real preferences).
+  res.json({ prefs: resolvePrefs((req.user as any).notification_prefs), web: (req.user as any).notification_prefs?.web ?? {} });
 });
 
 r.put('/me/notification-prefs', authenticate, async (req, res) => {
   const keys = Object.keys(NOTIFICATION_DEFAULTS) as [NotificationPrefKey, ...NotificationPrefKey[]];
   const b = z.record(z.enum(keys), z.boolean()).parse(req.body?.prefs ?? {});
-  const merged = { ...((req.user as any).notification_prefs ?? {}), ...b };
+  const web = req.body?.web !== undefined ? z.record(z.string().max(40), z.boolean()).parse(req.body.web) : undefined;
+  const merged = { ...((req.user as any).notification_prefs ?? {}), ...b, ...(web ? { web } : {}) };
   await db.from('profiles').update({ notification_prefs: merged, updated_at: new Date().toISOString() }).eq('id', req.user.id);
   res.json({ prefs: resolvePrefs(merged) });
 });
