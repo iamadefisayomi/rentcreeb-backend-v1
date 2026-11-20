@@ -106,6 +106,15 @@ const row = (b: z.infer<typeof propertyBody>) => ({
 const slugFor = (b: { title?: string; listedIn?: string; propertyType?: string; area?: string; state?: string }) =>
   [b.listedIn, b.title, b.propertyType, b.area, b.state].filter(Boolean).join(' ').toLowerCase()
     .normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90) + '-' + Math.random().toString(36).slice(2, 8);
+/** Whether migration 023 (website columns) is applied; checked at most every 5 minutes. */
+let webColsCache: { ok: boolean; at: number } | null = null;
+async function hasWebColumns() {
+  if (webColsCache && (webColsCache.ok || Date.now() - webColsCache.at < 5 * 60_000)) return webColsCache.ok;
+  const { error } = await db.from('properties').select('listed_in').limit(1);
+  webColsCache = { ok: !error, at: Date.now() };
+  return webColsCache.ok;
+}
+
 /** /properties/:id also accepts a website slug or an id from the old website, so old links keep working. */
 async function resolvePropertyId(idOrSlug: string) {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug)) return idOrSlug;
@@ -185,9 +194,11 @@ r.get('/', async (req, res) => {
   if (q.verified === 'true') query = query.eq('is_verified', true);
   if (q.parking === 'true') query = query.eq('parking', true);
   if (q.minSize) query = query.gte('size_sqm', q.minSize);
-  if (q.listedIn) query = query.eq('listed_in', q.listedIn);
+  // Before migration 023 there is no listed_in column: sale = priced outright, rent / short-let = everything else.
+  const webCols = await hasWebColumns();
+  if (q.listedIn) query = webCols ? query.eq('listed_in', q.listedIn) : q.listedIn === 'for-sale' ? query.eq('price_period', 'outright') : query.neq('price_period', 'outright');
   if (q.state) query = query.ilike('state', q.state.replace(/[%_]/g, ''));
-  if (q.lga) query = query.ilike('web_details->>lga', q.lga.replace(/[%_]/g, ''));
+  if (q.lga && webCols) query = query.ilike('web_details->>lga', q.lga.replace(/[%_]/g, ''));
   if (q.owner) query = query.eq('owner_id', q.owner);
   if (q.minLat !== undefined && q.maxLat !== undefined && q.minLng !== undefined && q.maxLng !== undefined)
     query = query.gte('lat', q.minLat).lte('lat', q.maxLat).gte('lng', q.minLng).lte('lng', q.maxLng);
