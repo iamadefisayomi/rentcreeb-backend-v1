@@ -3,8 +3,8 @@ import { db, unwrap } from '../lib/supabase';
 import { paystack } from '../lib/paystack';
 import { HttpError } from '../lib/errors';
 
-export type Purpose = 'inspection' | 'subscription' | 'rent' | 'rentsave' | 'job_escrow' | 'job_topup';
-type Refs = Partial<Record<'booking_id' | 'subscription_id' | 'job_id' | 'quote_id' | 'tenancy_id' | 'rent_payment_id' | 'rentsave_plan_id', string>>;
+export type Purpose = 'inspection' | 'subscription' | 'rent' | 'rentsave' | 'job_escrow' | 'job_topup' | 'bill';
+type Refs = Partial<Record<'booking_id' | 'subscription_id' | 'job_id' | 'quote_id' | 'tenancy_id' | 'rent_payment_id' | 'rentsave_plan_id' | 'bill_item_id', string>>;
 
 /** Creates a pending payment row and a Paystack transaction. Returns what the RN client needs. */
 export async function createPayment(user: Profile, purpose: Purpose, amountKobo: number, refs: Refs = {}) {

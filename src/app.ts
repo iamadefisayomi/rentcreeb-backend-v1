@@ -35,6 +35,11 @@ import documentsRoutes from './routes/documents.routes';
 import keepAliveRoutes from './routes/keep-alive.routes';
 import mailRoutes from './routes/mail.routes';
 import assistantRoutes from './routes/assistant.routes';
+import tenancyExtrasRoutes from './routes/tenancyExtras.routes';
+import savedSearchesRoutes from './routes/savedSearches.routes';
+import screeningRoutes from './routes/screening.routes';
+import roommatesRoutes from './routes/roommates.routes';
+import billsRoutes from './routes/bills.routes';
 
 export function createApp() {
   const app = express();
@@ -91,7 +96,12 @@ export function createApp() {
   v1.use('/payments', paymentsRoutes);
   v1.use('/subscriptions', subscriptionsRoutes);
   v1.use('/wallet', walletRoutes);
+  v1.use('/tenancies', tenancyExtrasRoutes); // instalments, receipts, history, condition reports, agreements (before /:id)
   v1.use('/tenancies', tenanciesRoutes);
+  v1.use('/saved-searches', savedSearchesRoutes);
+  v1.use('/screening', screeningRoutes);
+  v1.use('/roommates', roommatesRoutes);
+  v1.use('/bills', billsRoutes);
   v1.use('/rentsave', rentsaveRoutes);
   v1.use('/maintenance', maintenanceRoutes);
   v1.use('/jobs', jobsRoutes);

@@ -5,6 +5,8 @@ import { notify } from '../services/notify';
 import { purgeVerificationEvidence } from '../services/verificationEvidence';
 import { reviewPendingListings } from '../services/listingReview';
 import { processMailQueue } from '../services/mailing';
+import { runSavedSearchAlerts } from '../routes/savedSearches.routes';
+import { markOverdueBills } from '../routes/bills.routes';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
@@ -16,6 +18,9 @@ export function startScheduler() {
 
   // Every minute: mailing list queue (scheduled campaigns, automations, rate-limited delivery).
   cron.schedule('* * * * *', () => { void processMailQueue(); });
+
+  // Every 10 min: saved-search alerts for newly approved listings.
+  cron.schedule('*/10 * * * *', () => { void runSavedSearchAlerts(); });
 
   // Every 10 min: expire unpaid bookings and stale OTPs. An unpaid booking can be paid later from My Bookings or the
   // property page for up to 24 hours, but never closer than 2 hours to the inspection (same rule as booking it).
@@ -34,6 +39,7 @@ export function startScheduler() {
       const { data: expired } = await db.from('subscriptions').update({ status: 'expired' }).eq('status', 'active').lt('expires_at', new Date().toISOString()).select('agent_id');
       for (const s of expired ?? []) await notify(s.agent_id, 'subscription_expired', 'Subscription expired', 'Renew your plan to make your listings visible again.');
       await db.from('rent_payments').update({ status: 'overdue' }).eq('status', 'due').lt('due_date', new Date().toISOString().slice(0, 10));
+      await markOverdueBills();
     } catch (err) { logger.error({ err }, 'cron: subscriptions/rent failed'); }
   });
 

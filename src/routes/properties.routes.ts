@@ -1,4 +1,5 @@
 import { parseVideoLink, videoPreview } from '../lib/videoLinks';
+import { applyFilters, boundsOf, filtersSchema, inPolygon } from '../lib/propertyFilters';
 import { Router } from 'express';
 import { z } from 'zod';
 import { db, dbError, unwrap } from '../lib/supabase';
@@ -303,6 +304,31 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
   const created = unwrap(await db.from('units').insert(units.map((u) => ({ ...unitRow(u), property_id: p.id }))).select());
   if (p.status === 'pending') queueListingReview(p.id); // checked in the background; the lister follows it on GET /:id/review
   res.status(201).json({ property: p, units: created, message: b.publish ? 'Submitted for approval' : 'Property saved' });
+});
+
+/**
+ * Map search: pins for every live listing in the visible box or a drawn area (?poly=lat,lng;lat,lng;…), with the same
+ * filters as the list search. Up to 400 pins, newest first; listings without a location are not on the map.
+ */
+r.get('/map', async (req, res) => {
+  const f = filtersSchema.parse(req.query);
+  const b = boundsOf(f);
+  if (!b) throw badRequest('Send the map area (minLat, maxLat, minLng, maxLng) or a drawn area (poly)', 'NO_AREA');
+  if (b.maxLat - b.minLat > 6 || b.maxLng - b.minLng > 6) throw badRequest('Zoom in a little to search this area', 'AREA_TOO_BIG');
+  const { data: lapsed } = await db.from('subscriptions').select('agent_id').eq('status', 'expired');
+  const { data: active } = await db.from('subscriptions').select('agent_id').eq('status', 'active').gt('expires_at', new Date().toISOString());
+  const activeSet = new Set((active ?? []).map((s) => s.agent_id));
+  const hidden = [...new Set((lapsed ?? []).map((s) => s.agent_id))].filter((id) => !activeSet.has(id));
+  let q: any = db.from('properties').select('id, title, area, price_kobo, price_period, bedrooms, bathrooms, property_type, is_verified, lat, lng, property_media(url, media_type, position)')
+    .eq('status', 'approved').not('lat', 'is', null).not('lng', 'is', null);
+  if (hidden.length) q = q.not('owner_id', 'in', `(${hidden.join(',')})`);
+  const { data, error } = await applyFilters(q, f).order('created_at', { ascending: false }).limit(400);
+  if (error) throw badRequest(error.message);
+  const pins = (data ?? []).filter((p: any) => !b.poly || inPolygon(p.lat, p.lng, b.poly)).map((p: any) => {
+    const cover = [...(p.property_media ?? [])].sort((x: any, y: any) => x.position - y.position).find((m: any) => m.media_type !== 'video')?.url ?? null;
+    return { id: p.id, title: p.title, area: p.area, price_kobo: p.price_kobo, price_period: p.price_period, bedrooms: p.bedrooms, bathrooms: p.bathrooms, property_type: p.property_type, is_verified: p.is_verified, lat: p.lat, lng: p.lng, cover };
+  });
+  res.json({ pins, total: pins.length, capped: (data ?? []).length >= 400 });
 });
 
 /** Title and thumbnail for a video tour link (used while adding links and on the listing page). */

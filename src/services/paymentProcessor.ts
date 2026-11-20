@@ -9,6 +9,7 @@ import { notify } from './notify';
 import { settleRent } from './rent';
 import { logForJob } from './maintenance';
 import { ensureConversation } from './conversations';
+import { settleBillPayment } from '../routes/bills.routes';
 
 /**
  * Single entry point for confirming a Paystack payment (webhook AND client-side verify).
@@ -37,7 +38,7 @@ export async function confirmPayment(reference: string) {
   if (!payment) return { status: 'success', payment: existing }; // another worker won the race
 
   const handlers: Record<string, (p: any) => Promise<void>> = {
-    inspection: onInspection, subscription: onSubscription, rent: onRent, rentsave: onRentSave, job_escrow: onJobEscrow, job_topup: onJobTopup,
+    inspection: onInspection, subscription: onSubscription, rent: onRent, rentsave: onRentSave, job_escrow: onJobEscrow, job_topup: onJobTopup, bill: settleBillPayment,
   };
   try { await handlers[payment.purpose](payment); }
   catch (err) { logger.error({ err, reference }, 'post-payment handler failed'); }

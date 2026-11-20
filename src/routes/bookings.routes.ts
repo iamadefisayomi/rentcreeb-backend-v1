@@ -28,7 +28,7 @@ async function getBooking(id: string, userId: string) {
 
 /** Step 5–6: create booking + start Paystack payment. Requires NIN verification. */
 r.post('/', requireRole('tenant'), requireVerified, async (req, res) => {
-  const { propertyId, scheduledAt } = z.object({ propertyId: uuid, scheduledAt: z.coerce.date() }).parse(req.body);
+  const { propertyId, scheduledAt, mode } = z.object({ propertyId: uuid, scheduledAt: z.coerce.date(), mode: z.enum(['in_person', 'virtual']).default('in_person') }).parse(req.body);
   if (scheduledAt.getTime() < Date.now() + 2 * 3600 * 1000) throw badRequest('Choose a time at least 2 hours from now', 'BAD_DATE');
 
   const { data: p } = await db.from('properties').select('*').eq('id', propertyId).eq('status', 'approved').maybeSingle();
@@ -43,6 +43,7 @@ r.post('/', requireRole('tenant'), requireVerified, async (req, res) => {
   const booking = unwrap(await db.from('bookings').insert({
     property_id: propertyId, tenant_id: req.user.id, host_id: p.owner_id, scheduled_at: scheduledAt.toISOString(),
     amount_kobo: amount, fee_kobo: pct(amount, env.INSPECTION_PLATFORM_FEE_PCT),
+    ...(mode === 'virtual' ? { mode } : {}), // only sent when used, so in-person booking works before migration 022
   }).select().single());
   const payment = await createPayment(req.user, 'inspection', amount, { booking_id: booking.id });
   res.status(201).json({ booking, payment });
@@ -134,6 +135,31 @@ r.post('/:id/validate-inspection', requireRole('agent', 'landlord', 'estate_mana
   const { data: e } = await db.from('escrows').select('id').eq('booking_id', b.id).eq('kind', 'inspection').maybeSingle();
   if (e) await releaseEscrow(e.id);
   await notify(b.tenant_id, 'inspection_done', 'Inspection complete', 'How was it? Leave a review or report an issue.', { bookingId: b.id, propertyId: b.property_id });
+  res.json({ status: 'completed' });
+});
+
+/**
+ * Virtual inspection done (a live video walkthrough instead of a visit; there is no OTP at a property).
+ * The tenant can confirm it any time after it starts. The host can complete it only after a video call in this
+ * booking's chat that was answered and lasted at least 3 minutes. Either way the fee is released to the host.
+ */
+const MIN_VIRTUAL_SECONDS = 180;
+r.post('/:id/complete-virtual', async (req, res) => {
+  const b = await getBooking(String(req.params.id), req.user.id);
+  if (b.mode !== 'virtual') throw badRequest('This is an in-person inspection: use the inspection code at the property', 'NOT_VIRTUAL');
+  if (b.status !== 'confirmed') throw badRequest('Booking is not confirmed', 'BAD_STATE');
+  if (new Date(b.scheduled_at).getTime() - Date.now() > 30 * 60_000) throw badRequest('The virtual inspection has not started yet', 'TOO_EARLY');
+  if (req.user.id === b.host_id) {
+    const { data: conv } = await db.from('conversations').select('id').eq('context_type', 'booking').eq('context_id', b.id).limit(1).maybeSingle();
+    const { data: calls } = conv ? await db.from('calls').select('answered_at, ended_at').eq('conversation_id', conv.id).eq('kind', 'video').not('answered_at', 'is', null) : { data: [] as any[] };
+    const longest = Math.max(0, ...(calls ?? []).map((c: any) => (Date.parse(c.ended_at ?? new Date().toISOString()) - Date.parse(c.answered_at)) / 1000));
+    if (longest < MIN_VIRTUAL_SECONDS) throw badRequest('Do the video walkthrough first: a video call of at least 3 minutes in this booking\'s chat. Or ask the tenant to confirm.', 'NO_CALL');
+  }
+  await db.from('bookings').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', b.id);
+  const { data: e } = await db.from('escrows').select('id').eq('booking_id', b.id).eq('kind', 'inspection').maybeSingle();
+  if (e) await releaseEscrow(e.id);
+  await notify(b.tenant_id, 'inspection_done', 'Virtual inspection complete', 'How was it? Leave a review or report an issue.', { bookingId: b.id, propertyId: b.property_id });
+  if (req.user.id === b.tenant_id) await notify(b.host_id, 'inspection_done', 'Virtual inspection confirmed', `${b.properties?.title ?? 'Inspection'}: the fee is on its way to your wallet.`, { bookingId: b.id });
   res.json({ status: 'completed' });
 });
 

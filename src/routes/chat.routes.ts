@@ -38,6 +38,7 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
     ctx.set(x.id, { id: x.id, kind: 'booking', status: x.status, title: x.properties?.title ?? 'Inspection', area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: x.scheduled_at, cover });
   }
   for (const x of (jbs.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'job', status: x.status, title: x.title, area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: null, cover: null, property: x.properties?.title ?? null });
+  for (const c of out as any[]) if (c.contextType === 'roommate') ctx.set(c.contextId, { id: c.contextId, kind: 'roommate', status: 'accepted', title: 'Roommate match', area: null, propertyId: null, date: null, cover: null });
   for (const x of (tks.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'support', status: x.status, title: x.subject, area: x.category, propertyId: null, date: x.created_at, cover: null });
   for (const c of out as any[]) c.context = ctx.get(c.contextId) ?? null;
 }

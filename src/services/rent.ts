@@ -40,11 +40,24 @@ export async function settleRent(
     await db.rpc('wallet_credit', { p_user: t.landlord_id, p_amount: paid, p_kind: 'rent', p_desc: 'Rent payment', p_ref: `rent:${rp.id}` });
   }
 
+  // Rent split into an approved instalment plan: the next rent period starts only after the LAST part is paid,
+  // counted from the original due date (not from the last part's date).
+  let base = rp.due_date as string;
+  let planOpen = false;
+  if ((rp as any).instalment_plan_id) {
+    const { count: left } = await db.from('rent_payments').select('id', { count: 'exact', head: true }).eq('instalment_plan_id', (rp as any).instalment_plan_id).neq('status', 'paid');
+    if (left) planOpen = true;
+    else {
+      const { data: plan } = await db.from('rent_instalment_plans').update({ status: 'completed' }).eq('id', (rp as any).instalment_plan_id).select('period_due_date').maybeSingle();
+      if (plan?.period_due_date) base = plan.period_due_date;
+    }
+  }
+
   // Schedule the next instalment once nothing remains for this due date.
-  const { count: stillDue } = await db.from('rent_payments').select('id', { count: 'exact', head: true })
+  const { count: stillDue } = planOpen ? { count: 1 } : await db.from('rent_payments').select('id', { count: 'exact', head: true })
     .eq('tenancy_id', t.id).eq('due_date', rp.due_date).neq('status', 'paid');
   if (!stillDue) {
-    const next = addInterval(new Date(rp.due_date), t.frequency);
+    const next = addInterval(new Date(base), t.frequency);
     const { count: exists } = await db.from('rent_payments').select('id', { count: 'exact', head: true }).eq('tenancy_id', t.id).gt('due_date', rp.due_date);
     if (!exists && (!t.lease_end || next <= new Date(t.lease_end)) && !t.terminates_on) {
       const nextDue = next.toISOString().slice(0, 10);
