@@ -5,6 +5,7 @@ import { uuid } from '../lib/common';
 import { notFound } from '../lib/errors';
 import { authenticate, requireRole, requireVerified } from '../middleware/auth';
 import { createPayment } from '../services/payments';
+import { isWebUrl } from '../lib/webAuth';
 
 const r = Router();
 
@@ -23,12 +24,12 @@ r.get('/current', authenticate, requireRole('agent'), async (req, res) => {
 
 /** Pay via Paystack → webhook activates the plan. */
 r.post('/checkout', authenticate, requireRole('agent'), requireVerified, async (req, res) => {
-  const { planId, billing } = z.object({ planId: uuid, billing: z.enum(['monthly', 'yearly']).default('monthly') }).parse(req.body);
+  const { planId, billing, callbackUrl } = z.object({ planId: uuid, billing: z.enum(['monthly', 'yearly']).default('monthly'), callbackUrl: z.string().max(500).refine(isWebUrl, 'Unsupported callback URL').optional() }).parse(req.body);
   const { data: plan } = await db.from('subscription_plans').select('*').eq('id', planId).eq('active', true).maybeSingle();
   if (!plan) throw notFound('Plan not found');
   const amount = billing === 'yearly' ? yearlyPrice(Number(plan.price_kobo)) : Number(plan.price_kobo);
   const sub = unwrap(await db.from('subscriptions').insert({ agent_id: req.user.id, plan_id: plan.id, billing_cycle: billing }).select().single());
-  const payment = await createPayment(req.user, 'subscription', amount, { subscription_id: sub.id });
+  const payment = await createPayment(req.user, 'subscription', amount, { subscription_id: sub.id }, { callbackUrl });
   res.status(201).json({ subscription: sub, payment });
 });
 

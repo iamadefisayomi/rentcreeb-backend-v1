@@ -5,6 +5,7 @@ import { responseTime } from '../services/responseTime';
 import { db, unwrap } from '../lib/supabase';
 import { badRequest, conflict, forbidden, notFound } from '../lib/errors';
 import { authenticate } from '../middleware/auth';
+import { phoneSchema } from '../lib/common';
 import { NOTIFICATION_DEFAULTS, resolvePrefs, type NotificationPrefKey } from '../services/notify';
 
 const r = Router();
@@ -23,7 +24,10 @@ r.patch('/me', authenticate, async (req, res) => {
     avatarUrl: z.string().url().nullable().optional(), bio: z.string().max(300).optional(),
     role: z.enum(['tenant', 'landlord', 'estate_manager', 'artisan', 'agent']).optional(),
     onboardingCompleted: z.boolean().optional(),
-    username: z.string().trim().toLowerCase().regex(/^[a-z0-9._]{3,30}$/, '3–30 characters: letters, numbers, dots or underscores').nullable().optional(),
+    username: z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,30}$/, '3–30 characters: letters, numbers, dots, dashes or underscores').nullable().optional(),
+    /** Website: WhatsApp number, social links, professional details, and a phone number that is not verified yet. */
+    whatsapp: optText(20), phone: optText(20),
+    socials: z.record(z.string().max(300)).optional(), professional: z.record(z.unknown()).optional(),
     gender: z.enum(['male', 'female', 'other', 'prefer_not_to_say']).nullable().optional(),
     dateOfBirth: z.string().date().nullable().optional(),
     agencyName: optText(120), licenseNumber: optText(60), location: optText(80),
@@ -47,6 +51,20 @@ r.patch('/me', authenticate, async (req, res) => {
   if (b.agencyName !== undefined) patch.agency_name = b.agencyName || null;
   if (b.licenseNumber !== undefined) patch.license_number = b.licenseNumber || null;
   if (b.location !== undefined) patch.location = b.location || null;
+  if (b.whatsapp !== undefined) patch.whatsapp = b.whatsapp || null;
+  if (b.socials) patch.socials = b.socials;
+  if (b.professional) patch.professional = b.professional;
+  // A verified phone is the sign-in number and only changes through the OTP flow.
+  if (b.phone !== undefined && b.phone !== req.user.phone) {
+    if (req.user.phone_verified) throw badRequest('Your phone number is verified. Change it in the RentCreeb app.', 'PHONE_LOCKED');
+    const phone = b.phone ? phoneSchema.safeParse(b.phone) : null;
+    if (phone && !phone.success) throw badRequest('Enter a valid Nigerian phone number', 'INVALID_PHONE');
+    if (phone?.success) {
+      const { data: used } = await db.from('profiles').select('id').eq('phone', phone.data).neq('id', req.user.id).maybeSingle();
+      if (used) throw conflict('This phone number is already linked to another account.', 'PHONE_IN_USE');
+    }
+    patch.phone = phone?.success ? phone.data : null; patch.phone_verified = false;
+  }
   res.json({ profile: unwrap(await db.from('profiles').update(patch).eq('id', req.user.id).select().single()) });
 });
 

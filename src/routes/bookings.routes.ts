@@ -9,6 +9,7 @@ import { issueOtp, verifyOtp } from '../lib/otp';
 import { sendSms } from '../lib/sms';
 import { authenticate, requireRole, requireVerified } from '../middleware/auth';
 import { createPayment } from '../services/payments';
+import { isWebUrl } from '../lib/webAuth';
 import { confirmPayment } from '../services/paymentProcessor';
 import { paystack } from '../lib/paystack';
 import { refundEscrow, releaseEscrow } from '../services/escrow';
@@ -28,7 +29,10 @@ async function getBooking(id: string, userId: string) {
 
 /** Step 5–6: create booking + start Paystack payment. Requires NIN verification. */
 r.post('/', requireRole('tenant'), requireVerified, async (req, res) => {
-  const { propertyId, scheduledAt, mode } = z.object({ propertyId: uuid, scheduledAt: z.coerce.date(), mode: z.enum(['in_person', 'virtual']).default('in_person') }).parse(req.body);
+  const { propertyId, scheduledAt, mode, callbackUrl } = z.object({
+    propertyId: uuid, scheduledAt: z.coerce.date(), mode: z.enum(['in_person', 'virtual']).default('in_person'),
+    callbackUrl: z.string().max(500).refine(isWebUrl, 'Unsupported callback URL').optional(), // website checkout
+  }).parse(req.body);
   if (scheduledAt.getTime() < Date.now() + 2 * 3600 * 1000) throw badRequest('Choose a time at least 2 hours from now', 'BAD_DATE');
 
   const { data: p } = await db.from('properties').select('*').eq('id', propertyId).eq('status', 'approved').maybeSingle();
@@ -45,7 +49,7 @@ r.post('/', requireRole('tenant'), requireVerified, async (req, res) => {
     amount_kobo: amount, fee_kobo: pct(amount, env.INSPECTION_PLATFORM_FEE_PCT),
     ...(mode === 'virtual' ? { mode } : {}), // only sent when used, so in-person booking works before migration 022
   }).select().single());
-  const payment = await createPayment(req.user, 'inspection', amount, { booking_id: booking.id });
+  const payment = await createPayment(req.user, 'inspection', amount, { booking_id: booking.id }, { callbackUrl });
   res.status(201).json({ booking, payment });
 });
 

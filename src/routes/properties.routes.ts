@@ -59,6 +59,9 @@ const propertyBody = z.object({
     }
     return out;
   }),
+  /** Website listings (migration 023): rent / sale / short-let and the website-only details, stored as they are. */
+  listedIn: z.enum(['for-rent', 'for-sale', 'short-let']).optional(),
+  webDetails: z.record(z.unknown()).optional(),
   /** false = private/managed property (landlord tools only), never shown in search */
   publish: z.boolean().default(true),
   /** Landlord multi-unit setup (Figma "Add Property & Tenant Setup"). Omitted → one unit from bedrooms/price. */
@@ -96,7 +99,21 @@ const row = (b: z.infer<typeof propertyBody>) => ({
   caution_fee_kobo: b.cautionFeeKobo, agency_fee_kobo: b.agencyFeeKobo, security_features: b.securityFeatures,
   title_document: b.titleDocument, plot_count: b.plotCount, commercial_use: b.commercialUse,
   video_urls: b.videoUrls,
+  listed_in: b.listedIn, web_details: b.webDetails,
 });
+
+/** Website URL slug: "for-rent-2-bedroom-flat-lekki-lagos-x7k2qp". */
+const slugFor = (b: { title?: string; listedIn?: string; propertyType?: string; area?: string; state?: string }) =>
+  [b.listedIn, b.title, b.propertyType, b.area, b.state].filter(Boolean).join(' ').toLowerCase()
+    .normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90) + '-' + Math.random().toString(36).slice(2, 8);
+/** /properties/:id also accepts a website slug or an id from the old website, so old links keep working. */
+async function resolvePropertyId(idOrSlug: string) {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug)) return idOrSlug;
+  const key = idOrSlug.slice(0, 200);
+  const { data, error } = await db.from('properties').select('id').or(`slug.ilike.${key.replace(/[,()*:%."\\_]/g, '')},legacy_id.eq.${key.replace(/[^a-zA-Z0-9]/g, '')}`).limit(1).maybeSingle();
+  if (error) return null;
+  return data?.id ?? null;
+}
 
 /** A column the code writes is missing (migration not applied yet). */
 const missingColumn = (e: { code?: string; message?: string } | null) => !!e && (e.code === 'PGRST204' || e.code === '42703');
@@ -130,10 +147,17 @@ r.get('/', async (req, res) => {
     q: z.string().optional(), area: z.string().optional(), type: z.string().optional(),
     minPrice: z.coerce.number().optional(), maxPrice: z.coerce.number().optional(),
     beds: z.coerce.number().optional(), baths: z.coerce.number().optional(),
-    sort: z.enum(['newest', 'price_asc', 'price_desc']).default('newest'),
+    sort: z.enum(['newest', 'oldest', 'price_asc', 'price_desc']).default('newest'),
     /** Filter sheet (Figma 4474:7679): comma lists for types / amenities, plus toggles. */
     types: z.string().optional(), amenities: z.string().optional(), period: z.enum(['year', 'month']).optional(),
     verified: z.enum(['true', 'false']).optional(), parking: z.enum(['true', 'false']).optional(), minSize: z.coerce.number().positive().optional(),
+    /** Website search (migration 023): rent / sale / short-let, state and LGA. */
+    listedIn: z.enum(['for-rent', 'for-sale', 'short-let']).optional(), state: z.string().max(60).optional(), lga: z.string().max(80).optional(),
+    owner: uuid.optional(),
+    /** Website: listings inside a box (near a searched place), and the owner's public profile on each card. */
+    minLat: z.coerce.number().min(-90).max(90).optional(), maxLat: z.coerce.number().min(-90).max(90).optional(),
+    minLng: z.coerce.number().min(-180).max(180).optional(), maxLng: z.coerce.number().min(-180).max(180).optional(),
+    withOwner: z.enum(['true', 'false']).optional(),
   }).parse(req.query);
   // PostgREST filter syntax uses , ( ) . : * as operators — strip them from free text so input can't add conditions.
   const term = q.q?.replace(/[,()*:\%."]/g, ' ').trim().slice(0, 80);
@@ -145,7 +169,8 @@ r.get('/', async (req, res) => {
   const activeSet = new Set((active ?? []).map((s) => s.agent_id));
   const hidden = [...new Set((lapsed ?? []).map((s) => s.agent_id))].filter((id) => !activeSet.has(id));
 
-  let query = db.from('properties').select(CARD, { count: 'exact' }).eq('status', 'approved');
+  const cols = q.withOwner === 'true' ? `${CARD}, owner:profiles!properties_owner_id_fkey(id, first_name, last_name, avatar_url, username, role, nin_verified, rating_avg)` : CARD;
+  let query = db.from('properties').select(cols, { count: 'exact' }).eq('status', 'approved');
   if (hidden.length) query = query.not('owner_id', 'in', `(${hidden.join(',')})`);
   if (term) query = query.or(`title.ilike.%${term}%,address.ilike.%${term}%,area.ilike.%${term}%`);
   if (q.area) query = query.ilike('area', `%${q.area}%`);
@@ -160,7 +185,14 @@ r.get('/', async (req, res) => {
   if (q.verified === 'true') query = query.eq('is_verified', true);
   if (q.parking === 'true') query = query.eq('parking', true);
   if (q.minSize) query = query.gte('size_sqm', q.minSize);
-  query = q.sort === 'price_asc' ? query.order('price_kobo') : q.sort === 'price_desc' ? query.order('price_kobo', { ascending: false }) : query.order('created_at', { ascending: false });
+  if (q.listedIn) query = query.eq('listed_in', q.listedIn);
+  if (q.state) query = query.ilike('state', q.state.replace(/[%_]/g, ''));
+  if (q.lga) query = query.ilike('web_details->>lga', q.lga.replace(/[%_]/g, ''));
+  if (q.owner) query = query.eq('owner_id', q.owner);
+  if (q.minLat !== undefined && q.maxLat !== undefined && q.minLng !== undefined && q.maxLng !== undefined)
+    query = query.gte('lat', q.minLat).lte('lat', q.maxLat).gte('lng', q.minLng).lte('lng', q.maxLng);
+  query = q.sort === 'price_asc' ? query.order('price_kobo') : q.sort === 'price_desc' ? query.order('price_kobo', { ascending: false })
+    : query.order('created_at', { ascending: q.sort === 'oldest' });
 
   const { data, count, error } = await query.range(from, to);
   if (error) throw badRequest(error.message);
@@ -290,7 +322,8 @@ r.post('/', authenticate, requireRole(...LISTER_ROLES), requireVerified, async (
   const b = (req.body?.publish === false ? draftBody : propertyBody).parse(req.body);
   if (b.publish) await assertCanList(req.user);
   if (b.units) assertUniqueLabels(b.units);
-  const ins = await db.from('properties').insert({ ...row(b), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single();
+  const web = b.listedIn || b.webDetails ? { slug: slugFor(b) } : {}; // website listings get a URL slug
+  const ins = await db.from('properties').insert({ ...row(b), ...web, owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single();
   if (missingColumn(ins.error) && b.videoUrls?.length) throw badRequest(VIDEO_MIGRATION, 'MIGRATION_REQUIRED');
   const p = unwrap(missingColumn(ins.error)
     ? await db.from('properties').insert({ ...row({ ...b, videoUrls: undefined }), owner_id: req.user.id, status: b.publish ? 'pending' : 'unlisted', unit_mode: b.unitMode ?? 'single' }).select().single()
@@ -342,7 +375,9 @@ r.get('/video-preview', async (req, res) => {
 
 // ── Detail ──
 r.get('/:id', optionalAuth, async (req, res) => {
-  const { data: p } = await db.from('properties').select('*, property_media(id, url, media_type, position), nearby_places(*)').eq('id', req.params.id).maybeSingle();
+  const pid = await resolvePropertyId(String(req.params.id));
+  if (!pid) throw notFound('Property not found');
+  const { data: p } = await db.from('properties').select('*, property_media(id, url, media_type, position), nearby_places(*)').eq('id', pid).maybeSingle();
   const isOwner = !!p && req.user?.id === p.owner_id;
   // Owners can open their own pending/paused/unlisted listings; everyone else only sees live ones.
   if (!p || (!isOwner && !['approved', 'rented'].includes(p.status))) throw notFound('Property not found');

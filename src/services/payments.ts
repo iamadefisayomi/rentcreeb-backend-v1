@@ -7,13 +7,14 @@ export type Purpose = 'inspection' | 'subscription' | 'rent' | 'rentsave' | 'job
 type Refs = Partial<Record<'booking_id' | 'subscription_id' | 'job_id' | 'quote_id' | 'tenancy_id' | 'rent_payment_id' | 'rentsave_plan_id' | 'bill_item_id', string>>;
 
 /** Creates a pending payment row and a Paystack transaction. Returns what the RN client needs. */
-export async function createPayment(user: Profile, purpose: Purpose, amountKobo: number, refs: Refs = {}) {
+/** `callbackUrl`: where Paystack sends the payer afterwards (the website passes its own page; the app uses the default). */
+export async function createPayment(user: Profile, purpose: Purpose, amountKobo: number, refs: Refs = {}, opts: { callbackUrl?: string } = {}) {
   if (!user.email) throw new HttpError(400, 'Account has no email', 'NO_EMAIL');
   const reference = `RC_${purpose.toUpperCase()}_${randomUUID().replace(/-/g, '').slice(0, 18)}`;
   const payment = unwrap(
     await db.from('payments').insert({ user_id: user.id, purpose, reference, amount_kobo: amountKobo, ...refs }).select().single(),
   );
-  const init = await paystack.initialize({ email: user.email, amountKobo, reference, metadata: { purpose, payment_id: payment.id } });
+  const init = await paystack.initialize({ email: user.email, amountKobo, reference, metadata: { purpose, payment_id: payment.id }, callbackUrl: opts.callbackUrl });
   await db.from('payments').update({ access_code: init.access_code }).eq('id', payment.id);
   return { paymentId: payment.id as string, reference, authorizationUrl: init.authorization_url, accessCode: init.access_code, amountKobo };
 }

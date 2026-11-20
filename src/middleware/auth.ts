@@ -15,6 +15,7 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   if (!profile) throw new HttpError(403, 'Profile not found', 'NO_PROFILE');
   if (profile.is_suspended) throw forbidden('Account suspended', 'SUSPENDED');
   req.user = profile as Profile;
+  req.webEmailConfirmed = data.user.user_metadata?.signup_source === 'website' && !!data.user.email_confirmed_at;
   markSeen(profile.id);
   next();
 }
@@ -39,7 +40,8 @@ export const requireRole = (...roles: Role[]) => (req: Request, _res: Response, 
 
 /** Phone verified (partially verified or better). */
 export function requirePhoneVerified(req: Request, _res: Response, next: NextFunction) {
-  if (!req.user.phone_verified) throw forbidden('Verify your phone number first', 'PHONE_VERIFICATION_REQUIRED');
+  // Website accounts (email + password, no phone at sign-up) count as verified once their email is confirmed.
+  if (!req.user.phone_verified && !req.webEmailConfirmed) throw forbidden('Verify your phone number first', 'PHONE_VERIFICATION_REQUIRED');
   next();
 }
 

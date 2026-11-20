@@ -16,11 +16,11 @@ async function ps<T = any>(path: string, init: { method?: string; body?: unknown
 }
 
 export const paystack = {
-  initialize: (p: { email: string; amountKobo: number; reference: string; metadata?: object }) =>
+  initialize: (p: { email: string; amountKobo: number; reference: string; metadata?: object; callbackUrl?: string }) =>
     ps<{ authorization_url: string; access_code: string; reference: string }>('/transaction/initialize', {
       method: 'POST',
       body: { email: p.email, amount: p.amountKobo, reference: p.reference, currency: 'NGN',
-              callback_url: env.PAYSTACK_CALLBACK_URL, metadata: p.metadata },
+              callback_url: p.callbackUrl ?? env.PAYSTACK_CALLBACK_URL, metadata: p.metadata },
     }),
   verify: (reference: string) =>
     ps<{ status: string; amount: number; reference: string; channel: string }>(`/transaction/verify/${encodeURIComponent(reference)}`),

@@ -21,6 +21,8 @@ interface Profile {
 declare namespace Express {
   interface Request {
     user: Profile;
+    /** Website accounts confirm their email instead of a phone (signup_source = website). */
+    webEmailConfirmed?: boolean;
     rawBody?: Buffer;
   }
 }

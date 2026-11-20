@@ -30,6 +30,7 @@ import jobsRoutes from './routes/jobs.routes';
 import artisanRoutes from './routes/artisan.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import adminRoutes from './routes/admin.routes';
+import webRoutes from './routes/web.routes';
 import supportRoutes from './routes/support.routes';
 import documentsRoutes from './routes/documents.routes';
 import keepAliveRoutes from './routes/keep-alive.routes';
@@ -110,6 +111,7 @@ export function createApp() {
   v1.use('/support', supportRoutes);
   v1.use('/assistant', assistantRoutes);
   v1.use('/documents', documentsRoutes);
+  v1.use('/web', strict, webRoutes); // rentcreeb.com website: email sign-up, reset links, waitlist
   v1.use('/admin', adminRoutes);
   // Maintenance mode (env MAINTENANCE_MODE or the admin dashboard switch). Admins can still sign in and work.
   const MAINTENANCE_OPEN = /^\/(admin|auth\/(login|refresh|logout)|users\/me$|config$)/;

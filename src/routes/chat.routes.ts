@@ -11,6 +11,7 @@ import { isTyping, presenceOf, setTyping } from '../services/presence';
 import { PRIVACY_DEFAULTS } from './support.routes';
 import { ensureConversation } from '../services/conversations';
 import { SUPPORT_PERSON, onUserSupportMessage } from '../services/supportChat';
+import { removePhoneNumbers } from '../lib/webAuth';
 
 const r = Router();
 r.use(authenticate);
@@ -27,6 +28,14 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
   const bIds = out.filter((c) => c.contextType === 'booking').map((c) => c.contextId);
   const jIds = out.filter((c) => c.contextType === 'job').map((c) => c.contextId);
   const sIds = out.filter((c) => c.contextType === 'support').map((c) => c.contextId);
+  const pIds = out.filter((c) => c.contextType === 'property').map((c) => c.contextId);
+  if (pIds.length) {
+    const { data: props } = await db.from('properties').select('id, title, area, slug, property_media(url, position)').in('id', pIds);
+    for (const x of (props ?? []) as any[]) {
+      const cover = [...(x.property_media ?? [])].sort((m: any, n: any) => m.position - n.position)[0]?.url ?? null;
+      for (const c of out as any[]) if (c.contextType === 'property' && c.contextId === x.id) c.context = { id: x.id, kind: 'property', status: 'enquiry', title: x.title, area: x.area, propertyId: x.id, slug: x.slug ?? null, date: null, cover };
+    }
+  }
   const [bks, jbs, tks] = await Promise.all([
     bIds.length ? db.from('bookings').select('id, status, scheduled_at, properties(id, title, area, property_media(url, position))').in('id', bIds) : Promise.resolve({ data: [] as any[] }),
     jIds.length ? db.from('jobs').select('id, status, title, properties(id, title, area)').in('id', jIds) : Promise.resolve({ data: [] as any[] }),
@@ -40,7 +49,7 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
   for (const x of (jbs.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'job', status: x.status, title: x.title, area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: null, cover: null, property: x.properties?.title ?? null });
   for (const c of out as any[]) if (c.contextType === 'roommate') ctx.set(c.contextId, { id: c.contextId, kind: 'roommate', status: 'accepted', title: 'Roommate match', area: null, propertyId: null, date: null, cover: null });
   for (const x of (tks.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'support', status: x.status, title: x.subject, area: x.category, propertyId: null, date: x.created_at, cover: null });
-  for (const c of out as any[]) c.context = ctx.get(c.contextId) ?? null;
+  for (const c of out as any[]) if (c.contextType !== 'property') c.context = ctx.get(c.contextId) ?? null;
 }
 
 /** Conversations exist only after a booking is confirmed or a job is assigned. */
@@ -65,10 +74,16 @@ r.get('/', async (req, res) => {
  * tenant talk to the artisan. Same shape as GET /:id.
  */
 r.post('/open', async (req, res) => {
-  const b = z.object({ contextType: z.enum(['booking', 'job']), contextId: z.string().uuid(), with: z.enum(['landlord', 'tenant', 'artisan', 'host']).optional() }).parse(req.body);
+  const b = z.object({ contextType: z.enum(['booking', 'job', 'property']), contextId: z.string().uuid(), with: z.enum(['landlord', 'tenant', 'artisan', 'host']).optional() }).parse(req.body);
   const me = req.user.id;
   let other: string | null = null;
-  if (b.contextType === 'booking') {
+  if (b.contextType === 'property') {
+    // Enquiry about a live listing, with its owner. Phone numbers are removed from these messages.
+    const { data: p } = await db.from('properties').select('owner_id, status').eq('id', b.contextId).maybeSingle();
+    if (!p || !['approved', 'rented'].includes(p.status)) throw notFound('Property not available');
+    if (p.owner_id === me) throw badRequest('You cannot message yourself about your own property', 'CHAT_LOCKED');
+    other = p.owner_id;
+  } else if (b.contextType === 'booking') {
     const { data: bk } = await db.from('bookings').select('tenant_id, host_id, status').eq('id', b.contextId).maybeSingle();
     if (!bk) throw notFound('Booking not found');
     if (![bk.tenant_id, bk.host_id].includes(me)) throw forbidden();
@@ -147,6 +162,7 @@ r.post('/:id/messages', async (req, res) => {
     if (!data || data.conversation_id !== c.id) throw badRequest('You can only reply to a message in this chat', 'BAD_REPLY');
     quoted = { id: data.id, body: data.body, attachment_url: data.attachment_url, sender_id: data.sender_id };
   }
+  if (c.context_type === 'property' && b.body) b.body = removePhoneNumbers(b.body);
   const row: Record<string, unknown> = { conversation_id: c.id, sender_id: req.user.id, body: b.body?.trim() || null, attachment_url: b.attachmentUrl };
   if (quoted) row.reply_to_id = quoted.id; // only touch the column when replying, so plain messages work before migration 010
   if (b.attachment) Object.assign(row, { attachment_path: b.attachment.path, attachment_name: b.attachment.name, attachment_type: b.attachment.type, attachment_size: b.attachment.size });

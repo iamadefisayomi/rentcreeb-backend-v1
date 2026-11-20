@@ -8,6 +8,22 @@ import { issueOtp, verifyOtp } from '../lib/otp';
 import { sendSms } from '../lib/sms';
 import { authenticate } from '../middleware/auth';
 import { logger } from '../lib/logger';
+import { isWebUrl, verifyBetterAuthHash } from '../lib/webAuth';
+
+/**
+ * Accounts imported from the old website keep their password: if Supabase rejects it and the account still has an
+ * imported hash that matches, the password is moved into Supabase Auth (and the old hash deleted).
+ */
+async function tryLegacyPassword(email: string, password: string) {
+  const { data: p } = await db.from('profiles').select('id').ilike('email', email.replace(/[\\%_]/g, (c) => '\\' + c)).maybeSingle();
+  if (!p) return false;
+  const { data: cred, error } = await db.from('legacy_credentials').select('hash').eq('user_id', p.id).maybeSingle();
+  if (error || !cred || !(await verifyBetterAuthHash(password, cred.hash))) return false;
+  const { error: ue } = await db.auth.admin.updateUserById(p.id, { password, email_confirm: true });
+  if (ue) { logger.error({ err: ue }, 'legacy password: could not move into Supabase'); return false; }
+  await db.from('legacy_credentials').delete().eq('user_id', p.id);
+  return true;
+}
 
 const r = Router();
 
@@ -118,7 +134,9 @@ r.post('/login', async (req, res) => {
     if (!data?.email) throw unauthorized('Invalid credentials');
     email = data.email;
   }
-  const { data, error } = await anonClient().auth.signInWithPassword({ email, password });
+  let { data, error } = await anonClient().auth.signInWithPassword({ email, password });
+  if (error && /not confirmed/i.test(error.message)) throw unauthorized('Confirm your email first: open the link we emailed you, or request a new one.', 'EMAIL_NOT_CONFIRMED');
+  if ((error || !data.session) && await tryLegacyPassword(email, password)) ({ data, error } = await anonClient().auth.signInWithPassword({ email, password }));
   if (error || !data.session) throw unauthorized('Invalid credentials');
   const profile = unwrap(await db.from('profiles').select('*').eq('id', data.user.id).single());
   res.json({ profile, session: data.session });
@@ -187,8 +205,8 @@ const APP_REDIRECT = /^(exp|exps):\/\/[^\s]+$|^rentcreeb:\/\/[^\s]*$/;
 
 r.post('/oauth/start', async (req, res) => {
   const b = z.object({
-    provider: z.enum(['google']),
-    redirectTo: z.string().max(500).refine((u) => APP_REDIRECT.test(u), 'Unsupported redirect'),
+    provider: z.enum(['google', 'facebook']), // facebook: enable the provider in Supabase Auth first
+    redirectTo: z.string().max(500).refine((u) => APP_REDIRECT.test(u) || isWebUrl(u), 'Unsupported redirect'),
     codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
   }).parse(req.body);
   const url = new URL(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/authorize`);
@@ -200,7 +218,7 @@ r.post('/oauth/start', async (req, res) => {
 });
 
 r.post('/oauth/finish', async (req, res) => {
-  const b = z.object({ code: z.string().min(10).max(500), codeVerifier: z.string().regex(/^[A-Za-z0-9_~.-]{43,128}$/) }).parse(req.body);
+  const b = z.object({ code: z.string().min(10).max(500), codeVerifier: z.string().regex(/^[A-Za-z0-9_~.-]{43,128}$/), source: z.enum(["app", "website"]).optional() }).parse(req.body);
   const r1 = await fetch(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/token?grant_type=pkce`, {
     method: 'POST', headers: { apikey: env.SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ auth_code: b.code, code_verifier: b.codeVerifier }),
@@ -222,6 +240,8 @@ r.post('/oauth/finish', async (req, res) => {
   if (!existing.email && u.email) patch.email = u.email;
   const profile = Object.keys(patch).length ? unwrap(await db.from('profiles').update(patch).eq('id', u.id).select('*').single()) : existing;
   const isNewUser = Date.now() - Date.parse(u.created_at) < 5 * 60 * 1000 && !profile.onboarding_completed;
+  // Google accounts created on the website: Google confirmed the email, which counts instead of a phone code there.
+  if (isNewUser && b.source === "website" && !meta.signup_source) await db.auth.admin.updateUserById(u.id, { user_metadata: { ...meta, signup_source: "website" } });
   res.json({
     profile,
     session: { access_token: session.access_token, refresh_token: session.refresh_token, expires_in: session.expires_in, expires_at: session.expires_at, token_type: session.token_type },

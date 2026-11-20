@@ -8,6 +8,10 @@ const schema = z.object({
   /** 'true' → every /api/v1 call returns 503 MAINTENANCE (webhooks + /health keep working). */
   MAINTENANCE_MODE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   APP_BASE_URL: z.string().default('https://rentcreeb.com'),
+  /** The rentcreeb.com website (Next.js). Email links, Google sign-in and Paystack return there. */
+  WEB_BASE_URL: z.string().url().default('https://www.rentcreeb.com').transform((u) => u.replace(/\/+$/, '')),
+  /** Extra website origins allowed as redirect targets (comma separated, e.g. Vercel preview URLs). */
+  WEB_ORIGINS: z.string().optional(),
 
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
