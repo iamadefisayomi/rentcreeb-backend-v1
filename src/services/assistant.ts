@@ -65,6 +65,9 @@ const SCREENS: Record<string, string> = {
   AddProperty: 'add a managed property (landlords)', PropertyManage: 'manage one of my properties (params.id)',
   AddTenancy: 'add a tenant / tenancy (landlords)', TenancyDetail: 'one tenancy (landlords, params.id)', RentCollection: 'rent collection (landlords)',
   JobDetail: 'one repair job (params.id)', ArtisanEditProfile: 'edit artisan profile',
+  MapSearch: 'search homes on a map / draw an area', SavedSearches: 'saved searches and new-listing alerts', Roommates: 'find a roommate (tenants)', RoommateProfileEdit: 'my roommate profile',
+  TenancyTools: 'tenancy tools: instalments, agreement, checklist, bills (params.id = tenancy id)', RentalHistory: 'rental history, rent receipts, rental reference (tenants)',
+  MyBills: 'my service charge / utility bills (tenants)', Bills: 'create and track bills for tenants (landlords)', Screening: 'rental profile requests (share / request screening)',
 };
 const ALLOWED_SCREENS = new Set(Object.keys(SCREENS).filter((s) => !FACTS.screens?.length || FACTS.screens.includes(s) || ['Explore', 'Saved'].includes(s)));
 

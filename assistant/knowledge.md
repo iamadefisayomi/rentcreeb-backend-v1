@@ -34,6 +34,11 @@ and goes through Paystack; RentCreeb holds payments in escrow until the service 
 - Only approved listings appear. "Verified listing" badges mean RentCreeb checked the listing.
 - Save properties with the heart; Saved can be organised into named collections and flags price drops.
 
+## Search tools (tenants)
+- **Map search**: Search → Map (or Home → Map search). Browse listings as price pins, or tap **Draw area** and draw around the neighbourhood you want.
+- **Saved searches & alerts**: set filters (or draw an area), tap **Save search**. RentCreeb checks new listings every few minutes and sends a notification when one matches. Manage them in Home → Saved searches (switch alerts on/off, delete).
+- **Find a roommate**: Home → Roommates. Create a roommate profile (need a room / have a room, areas, budget, move-in date, lifestyle), browse people (best matches first), send a request. Only verified users can send or accept requests; accepting opens a chat in Messages. Phone numbers stay private.
+
 ## Inspections (bookings)
 1. On a property page, tap **Book Inspection**, pick a date and time, pay the inspection fee (Paystack). The booking is "paid".
 2. The agent/landlord confirms it ("confirmed"). Chat with them opens once the inspection is confirmed.
@@ -41,6 +46,7 @@ and goes through Paystack; RentCreeb holds payments in escrow until the service 
 4. After the inspection the fee is released to the agent (minus the platform fee) and the tenant can leave a review.
 - Unpaid bookings expire automatically. A booking can be paid later from My Bookings within a limited time.
 - Cancel/reschedule from My Bookings: free inside the free-cancellation window, otherwise a small cancellation charge (both shown before confirming). If the host declines or cancels, the tenant is refunded.
+- **Virtual inspection**: when booking, choose **Virtual** instead of In person. At the booked time either side taps **Start video walkthrough** on the booking (an in-app video call). The tenant confirms it happened (or the agent marks it done after a video call of at least 3 minutes), which releases the fee. Good for people outside Lagos.
 - Agent didn't show up, or something felt wrong: open the booking → **Report agent**. RentCreeb investigates and refunds if the agent was at fault.
 
 ## Payments, escrow and wallet
@@ -54,6 +60,14 @@ and goes through Paystack; RentCreeb holds payments in escrow until the service 
 - A landlord/estate manager adds a tenancy (unit, rent, frequency yearly/quarterly/monthly, lease dates). Invited tenants are linked automatically when they sign up with the same email or phone.
 - Tenants see rent due on the Rent dashboard and can pay in the app; landlords can also record cash/transfer payments, send reminders, renew or terminate leases (the tenant accepts a renewal in the app), and export reports.
 - Rent not paid by the due date shows as overdue.
+
+## Tenancy tools (Rent → "Instalments, agreement, bills & more"; landlords: tenant → "Agreement & checklist")
+- **Rent in instalments**: a tenant on yearly or quarterly rent can ask to split the next rent into 2–12 monthly (or quarterly) parts. Nothing changes until the landlord approves. Once approved, each part appears as rent due and is paid like normal rent; the next full rent period is counted from the original due date. This is a payment plan agreed with the landlord, not a loan.
+- **Tenancy agreement**: the landlord creates a digital agreement from RentCreeb's standard template (pre-filled with the tenancy: parties, address, rent, dates, caution deposit), edits or adds clauses, then signs and sends. The tenant reads it and signs (typing their full name) or asks for changes. Signed agreements download as PDF with a tamper-evident fingerprint. The template is a starting point, not legal advice.
+- **Move-in / move-out checklist**: either side records each room's condition (good/fair/poor/damaged) with notes and photos, signs and sends; the other side signs or disputes. The move-out report starts from the move-in one so they can be compared, which settles caution-deposit disagreements. PDF available.
+- **Bills & service charges**: landlords split estate costs (service charge, diesel, electricity, water, security, waste…) across a property's tenants, equally or by custom amounts. Tenants pay their share in the app (Bills screen) and it goes to the landlord's wallet; landlords can also record cash/transfer payments, waive a share, or send reminders.
+- **Rental history & receipts** (tenants): every tenancy and rent payment on RentCreeb, with a downloadable receipt for each paid rent (including ones the landlord recorded) and a "rental reference" PDF to share with a future landlord.
+- **Rental profile (tenant screening)**: a landlord or agent can ask an applicant who booked their listing, or their tenant, to share their RentCreeb rental profile. The tenant sees exactly what is shared and chooses to share or decline. It shows: identity and phone verification, rental history on RentCreeb, rent paid on time vs late, whether they save with RentSave, inspections completed and upheld complaints. It never shows NIN, phone, bank details or amounts. Shares last 30 days and the tenant can withdraw any time. Tenants can preview their own profile.
 
 ## RentSave (tenants)
 - Save towards rent in scheduled amounts (daily, weekly or monthly) with a target and target date, optionally linked to a tenancy.
