@@ -10,6 +10,8 @@ const schema = z.object({
   APP_BASE_URL: z.string().default('https://rentcreeb.com'),
   /** The rentcreeb.com website (Next.js). Email links, Google sign-in and Paystack return there. */
   WEB_BASE_URL: z.string().url().default('https://www.rentcreeb.com').transform((u) => u.replace(/\/+$/, '')),
+  /** Inbox for the website's contact form and waitlist sign-ups. */
+  WEB_CONTACT_EMAIL: z.string().email().default('enquiry@rentcreeb.com'),
   /** Extra website origins allowed as redirect targets (comma separated, e.g. Vercel preview URLs). */
   WEB_ORIGINS: z.string().optional(),
 

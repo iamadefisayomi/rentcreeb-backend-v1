@@ -8,6 +8,7 @@ import { passwordSchema } from '../lib/common';
 import { authenticate, requireRole } from '../middleware/auth';
 import { sendEmail } from '../lib/email';
 import { isWebUrl, makeLinkToken, readLinkToken } from '../lib/webAuth';
+import { aiChat, aiEnabled } from '../lib/ai';
 
 /**
  * Endpoints only the rentcreeb.com website needs. The website signs people up with email + password (no phone),
@@ -21,7 +22,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 const emailHtml = (name: string, message: string, link: string, label: string) => `
 <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px;color:#1f2937">
   <h2 style="margin:0 0 16px;color:#1e3a8a">RentCreeb</h2>
-  <p>Hi ${esc(name || 'there')},</p><p>${esc(message)}</p>
+  <p>Hi ${esc(name || 'there')},</p><p>${esc(message).replace(/\n/g, '<br>')}</p>
   <p style="margin:28px 0"><a href="${esc(link)}" style="background:#1d4ed8;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:bold">${esc(label)}</a></p>
   <p style="font-size:12px;color:#6b7280">If the button does not work, copy this link into your browser:<br>${esc(link)}</p>
   <p style="font-size:12px;color:#6b7280">If you did not ask for this, you can ignore this email.</p>
@@ -187,7 +188,43 @@ r.post('/waitlist', limiter, async (req, res) => {
   const row = existing
     ? unwrap(await db.from('mailing_contacts').update({ tags: [...new Set([...(existing.tags ?? []), 'waitlist'])], attributes, updated_at: new Date().toISOString() }).eq('id', existing.id).select().single())
     : unwrap(await db.from('mailing_contacts').insert({ email: b.email, first_name: first, last_name: rest.join(' ') || null, source: 'signup_form', status: 'subscribed', consent_at: new Date().toISOString(), confirmed_at: new Date().toISOString(), tags: ['waitlist'], attributes }).select().single());
+  // Welcome email to the person, and a note to the RentCreeb inbox.
+  void sendEmail(b.email, "🎉 You're on the RentCreeb 2.0 Waitlist!", emailHtml(first, "Thanks for joining the RentCreeb 2.0 waitlist. We'll let you know as soon as it's ready for you.", env.WEB_BASE_URL, 'Visit RentCreeb'));
+  void sendEmail(env.WEB_CONTACT_EMAIL, `New Waitlist Signup • ${b.name}`, plainHtml([
+    ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['State', b.state ?? ''], ['LGA', b.lga ?? ''], ['City', b.city ?? ''],
+    ['Interest', b.interest.join(', ')], ['I am', b.iAm], ['Message', b.message || 'None'],
+  ]), { replyTo: b.email });
   res.status(201).json({ success: true, data: { id: row.id, ...b, status: 'pending', createdAt: row.created_at } });
+});
+
+// ── Contact form: the message goes to the RentCreeb inbox and the sender gets a confirmation ──
+const plainHtml = (rows: [string, string][]) => `<div style="font-family:Arial,sans-serif;color:#1f2937">${rows.map(([k, v]) => `<p><b>${esc(k)}:</b><br>${esc(v).replace(/\n/g, '<br>')}</p>`).join('')}</div>`;
+r.post('/contact', limiter, async (req, res) => {
+  const b = z.object({
+    name: z.string().trim().min(1).max(120), email: z.string().trim().email().toLowerCase(), message: z.string().trim().min(1).max(5000),
+    phone: z.string().trim().max(30).optional(), subject: z.string().trim().max(200).optional(),
+    desiredDate: z.string().max(40).optional(), desiredTime: z.string().max(40).optional(),
+  }).parse(req.body);
+  const first = b.name.split(/\s+/)[0];
+  await sendEmail(env.WEB_CONTACT_EMAIL, `New message from ${b.name}`, plainHtml([
+    ['Name', b.name], ['Email', b.email], ...(b.phone ? [['Phone', b.phone] as [string, string]] : []), ...(b.subject ? [['Subject', b.subject] as [string, string]] : []),
+    ...(b.desiredDate || b.desiredTime ? [['Preferred time', `${b.desiredDate ?? ''} ${b.desiredTime ?? ''}`.trim()] as [string, string]] : []), ['Message', b.message],
+  ]), { replyTo: b.email });
+  await sendEmail(b.email, `Dear ${first}, we got your message.`, emailHtml(first, `Thanks for contacting RentCreeb. We received your message and will reply soon.\n\nYour message: "${b.message.slice(0, 500)}"`, env.WEB_BASE_URL, 'Visit RentCreeb'));
+  res.json({ success: true });
+});
+
+// ── AI: polish a listing description (website "Generate description") ──
+r.post('/ai/property-description', authenticate, requireRole('agent', 'landlord', 'estate_manager', 'admin'), async (req, res) => {
+  const b = z.object({ description: z.string().trim().min(20, 'Write at least 20 characters first').max(5000), property: z.unknown().optional() }).parse(req.body);
+  if (!aiEnabled()) throw new HttpError(503, 'AI writing is not available right now', 'AI_DISABLED');
+  const facts = JSON.stringify(b.property ?? {}).slice(0, 4000);
+  const text = await aiChat([
+    { role: 'system', content: 'You write property listing descriptions for RentCreeb, a Nigerian rental marketplace. Rewrite the description to be polished, detailed and professional, clearly highlighting the key features, easy for renters or buyers to understand. Use only facts given; never invent amenities, prices or locations. Reply with the description text only: no title, no preamble, no markdown headings.' },
+    { role: 'user', content: `Property data: ${facts}\n\nCurrent description: """${b.description}"""` },
+  ], { maxTokens: 900, temperature: 0.5, timeoutMs: 60_000 });
+  if (!text?.trim()) throw new HttpError(503, 'Could not write a description right now. Please try again.', 'AI_FAILED');
+  res.json({ description: text.replace(/<\|[^|]*\|>/g, '').trim() });
 });
 
 /** Website admin → Waitlist. */

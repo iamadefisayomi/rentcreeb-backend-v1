@@ -15,7 +15,6 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { createRequire } from 'module';
 import { createHash, randomBytes } from 'crypto';
 /** Stable uuid for an old Mongo id (chat context of a listing that no longer exists). */
 const legacyUuid = (id: string) => { const h = createHash('md5').update('rentcreeb-legacy:' + id).digest('hex'); return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`; };
@@ -26,8 +25,8 @@ import { fromWebProperty } from '../../rentcreeb_file/client/lib/adapters';
 
 const DRY = process.argv.includes('--dry');
 const WEB_DIR = path.resolve(__dirname, '../../rentcreeb_file/client');
-const requireWeb = createRequire(path.join(WEB_DIR, 'package.json'));
-const { MongoClient, GridFSBucket, ObjectId } = requireWeb('mongodb');
+// The website no longer ships a MongoDB driver; the backend has it as a dev dependency for this one-off import.
+import { GridFSBucket, MongoClient, ObjectId } from 'mongodb';
 
 const webEnv = (() => {
   try {
