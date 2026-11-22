@@ -253,7 +253,20 @@ export function mountMailing(r: Router) {
   });
 
   // ───────── templates ─────────
-  r.get('/mailing/templates', async (_req, res) => {
+  /** Inserts starter templates whose name isn't taken yet; returns how many were added. */
+  const addStarters = async (req: any) => {
+    const { data: existing, error } = await db.from('mailing_templates').select('name');
+    if (error) throw dbError(error);
+    const have = new Set((existing ?? []).map((t) => t.name.trim().toLowerCase()));
+    const fresh = STARTER_TEMPLATES.filter((t) => !have.has(t.name.toLowerCase())).map((t) => ({ ...t, created_by: req.user.id }));
+    if (fresh.length) { const ins = await db.from('mailing_templates').insert(fresh); if (ins.error) throw dbError(ins.error); }
+    await audit(req, 'mailing.templates_starters', 'mailing', null, { added: fresh.length });
+    return fresh.length;
+  };
+  r.get('/mailing/templates', async (req, res) => {
+    // First visit: add the starter templates once. The audit row marks it done, so starters an admin deletes stay deleted.
+    const { count: seeded, error: aErr } = await db.from('admin_actions').select('id', { count: 'exact', head: true }).eq('action', 'mailing.templates_starters');
+    if (!aErr && !seeded) await addStarters(req);
     const { data, error } = await db.from('mailing_templates').select('*').order('updated_at', { ascending: false });
     if (error) throw dbError(error);
     res.json({ templates: data });
@@ -265,13 +278,8 @@ export function mountMailing(r: Router) {
   });
   /** Adds the built-in starter templates (services/mailingStarters.ts). Skips any whose name already exists, so it's safe to press twice. */
   r.post('/mailing/templates/starters', async (req, res) => {
-    const { data: existing, error } = await db.from('mailing_templates').select('name');
-    if (error) throw dbError(error);
-    const have = new Set((existing ?? []).map((t) => t.name.trim().toLowerCase()));
-    const fresh = STARTER_TEMPLATES.filter((t) => !have.has(t.name.toLowerCase())).map((t) => ({ ...t, created_by: req.user.id }));
-    if (fresh.length) { const ins = await db.from('mailing_templates').insert(fresh); if (ins.error) throw dbError(ins.error); }
-    await audit(req, 'mailing.templates_starters', 'mailing', null, { added: fresh.length });
-    res.json({ added: fresh.length, skipped: STARTER_TEMPLATES.length - fresh.length });
+    const added = await addStarters(req);
+    res.json({ added, skipped: STARTER_TEMPLATES.length - added });
   });
   r.patch('/mailing/templates/:id', async (req, res) => {
     const b = templateSchema.partial().parse(req.body);
