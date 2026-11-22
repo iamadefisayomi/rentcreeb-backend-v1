@@ -6,14 +6,32 @@ import { kobo, uuid } from '../lib/common';
 import { authenticate, requireRole } from '../middleware/auth';
 import { notify } from '../services/notify';
 import { logMaintenance, SLA_HOURS } from '../services/maintenance';
+import { approverOf, cancelOrder, cancelPolicy, createJobForRequest, payerOf } from '../services/jobOrders';
 
 const r = Router();
 r.use(authenticate);
 const SELECT = '*, maintenance_media(url), properties(id, title, address), tenancies(unit_label, units(label)), ' +
   'tenant:profiles!maintenance_requests_tenant_id_fkey(id, first_name, last_name, phone, avatar_url), ' +
-  'jobs(id, status, artisan_id, title, accepted_quote_id, revised_amount_kobo, revision_status, artisan:profiles!jobs_artisan_id_fkey(id, first_name, last_name, phone, avatar_url, rating_avg, rating_count))' as '*'; // concatenated → tell supabase-js to treat rows as untyped
+  'jobs(id, status, artisan_id, title, accepted_quote_id, revised_amount_kobo, revision_status, landlord_id, tenant_id, created_by, payer, budget_min_kobo, budget_max_kobo, artisan:profiles!jobs_artisan_id_fkey(id, first_name, last_name, phone, avatar_url, rating_avg, rating_count))' as '*'; // concatenated → tell supabase-js to treat rows as untyped
 const LANDLORDS = ['landlord', 'estate_manager'] as const;
 const OPEN = ['open', 'job_posted', 'in_progress'];
+
+/** What the signed-in user may do on this order (the app shows buttons from this). */
+function viewerFlags(userId: string, m: any, job: any | null) {
+  const isLandlord = userId === m.landlord_id;
+  const cancel = cancelPolicy(userId, m, job);
+  const waitingOnLandlord = m.status === 'open' && m.funding === 'landlord' && (m.funding_status ?? 'pending') === 'pending';
+  const declined = m.status === 'open' && m.funding === 'landlord' && m.funding_status === 'declined';
+  return {
+    role: isLandlord ? 'landlord' : 'tenant', createdBy: m.created_by ?? 'tenant', funding: m.funding ?? 'landlord', fundingStatus: m.funding_status ?? null,
+    isPayer: job ? payerOf(job) === userId : (m.funding === 'tenant' ? !isLandlord : isLandlord),
+    isApprover: job ? approverOf(job) === userId : (m.created_by === 'landlord' ? isLandlord : !isLandlord),
+    canDecideFunding: isLandlord && waitingOnLandlord,
+    canSelfFund: !isLandlord && m.created_by !== 'landlord' && (waitingOnLandlord || declined),
+    canResubmit: !isLandlord && declined,
+    canCancel: cancel.allowed, cancelBlockedReason: cancel.allowed ? null : cancel.reason ?? null,
+  };
+}
 
 /** Adds the fields the oversight screens show: unit label, SLA state, artisan, ticket age. */
 function ticketView(m: any) {
@@ -31,24 +49,43 @@ function ticketView(m: any) {
   };
 }
 
-/** Tenant: photo upload → category → submit. */
+/**
+ * Tenant: photo upload → category → submit. They choose who pays:
+ *   funding 'tenant'   → posted to artisans straight away (needs a budget); the landlord is told and can cancel.
+ *   funding 'landlord' → waits for the landlord to accept paying.
+ */
 r.post('/', requireRole('tenant'), async (req, res) => {
   const b = z.object({
     tenancyId: uuid, category: z.string().min(2), description: z.string().min(5),
     urgency: z.enum(['standard', 'urgent']).default('standard'), mediaUrls: z.array(z.string().url()).max(6).default([]),
     // Tenant's own read of how urgent it is (Figma: Low / Medium / High / Emergency). Landlords can change it later.
     priority: z.enum(['low', 'medium', 'high', 'emergency']).optional(),
+    funding: z.enum(['tenant', 'landlord']).default('landlord'),
+    budgetMinKobo: kobo.optional(), budgetMaxKobo: kobo.optional(), accessNotes: z.string().max(500).optional(),
   }).parse(req.body);
+  if (b.funding === 'tenant' && (!b.budgetMinKobo || !b.budgetMaxKobo)) throw badRequest('Set your budget range so artisans can quote', 'BUDGET_REQUIRED');
+  if (b.funding === 'tenant' && b.budgetMinKobo! > b.budgetMaxKobo!) throw badRequest('Min budget cannot exceed max');
   const urgency = b.priority ? (b.priority === 'high' || b.priority === 'emergency' ? 'urgent' : 'standard') : b.urgency;
   const { data: t } = await db.from('tenancies').select('*').eq('id', b.tenancyId).eq('tenant_id', req.user.id).eq('status', 'active').maybeSingle();
   if (!t) throw notFound('Active tenancy not found');
+  const selfPay = b.funding === 'tenant';
   const m = unwrap(await db.from('maintenance_requests').insert({
     tenancy_id: t.id, property_id: t.property_id, tenant_id: req.user.id, landlord_id: t.landlord_id,
-    category: b.category, description: b.description, urgency, ...(b.priority ? { priority: b.priority } : {}) }).select().single());
+    category: b.category, description: b.description, urgency, ...(b.priority ? { priority: b.priority } : {}),
+    created_by: 'tenant', funding: b.funding, funding_status: selfPay ? null : 'pending',
+    status: selfPay ? 'job_posted' : 'open' }).select().single());
   if (b.mediaUrls.length) await db.from('maintenance_media').insert(b.mediaUrls.map((url) => ({ request_id: m.id, url })));
-  await logMaintenance(m.id, req.user.id, 'submitted', 'Ticket submitted by tenant');
-  await notify(t.landlord_id, 'maintenance_request', 'New maintenance request', `${b.category}: ${b.description.slice(0, 80)}`, { requestId: m.id });
-  res.status(201).json({ request: m });
+  await logMaintenance(m.id, req.user.id, 'submitted', 'Job order created by tenant');
+  let job = null;
+  if (selfPay) {
+    job = await createJobForRequest(m, { payer: 'tenant', budgetMinKobo: b.budgetMinKobo!, budgetMaxKobo: b.budgetMaxKobo!, urgency, accessNotes: b.accessNotes });
+    await logMaintenance(m.id, req.user.id, 'self_funded', 'Tenant is paying — posted to artisans');
+    await notify(t.landlord_id, 'maintenance_request', 'Your tenant ordered a repair', `${b.category}: ${b.description.slice(0, 80)} · The tenant is paying. You can view or cancel it.`, { requestId: m.id });
+  } else {
+    await logMaintenance(m.id, req.user.id, 'funding_requested', 'Tenant asked the landlord to pay');
+    await notify(t.landlord_id, 'maintenance_request', 'Repair request: will you pay?', `${b.category}: ${b.description.slice(0, 80)} · Your tenant asked you to cover the cost.`, { requestId: m.id });
+  }
+  res.status(201).json({ request: { ...m, jobs: job ? [job] : [] }, job });
 });
 
 /**
@@ -85,7 +122,7 @@ r.get('/:id', async (req, res) => {
     db.from('maintenance_events').select('kind, note, created_at, actor:profiles!maintenance_events_actor_id_fkey(first_name, last_name, role)').eq('request_id', data.id).order('created_at'),
     job ? db.from('job_reports').select('*').eq('job_id', job.id).order('created_at', { ascending: false }).limit(1).maybeSingle() : Promise.resolve({ data: null }),
   ]);
-  res.json({ request: ticketView(data), job: job ?? null, report, events: events ?? [], timeline: { stages, current } });
+  res.json({ request: ticketView(data), job: job ?? null, report, events: events ?? [], timeline: { stages, current }, viewer: viewerFlags(req.user.id, data, job ?? null) });
 });
 
 /** Landlord changes a ticket's priority; the SLA deadline is recomputed from when it was opened. */
@@ -131,36 +168,66 @@ r.post('/:id/resolve', requireRole(...LANDLORDS), async (req, res) => {
   res.json({ status: 'completed' });
 });
 
-/** Landlord approves the ticket by posting it as a job for artisans. */
+/** Landlord accepts paying for the tenant's request and posts it to artisans (budget range). */
 r.post('/:id/post-job', requireRole('landlord', 'estate_manager'), async (req, res) => {
   const b = z.object({ budgetMinKobo: kobo, budgetMaxKobo: kobo, urgency: z.enum(['standard', 'urgent']).optional(), accessNotes: z.string().optional() }).parse(req.body);
   if (b.budgetMinKobo > b.budgetMaxKobo) throw badRequest('Min budget cannot exceed max');
-  const { data: m } = await db.from('maintenance_requests').select('*, maintenance_media(url)').eq('id', req.params.id).maybeSingle();
+  const { data: m } = await db.from('maintenance_requests').select('*').eq('id', req.params.id).maybeSingle();
   if (!m) throw notFound('Request not found');
   if (m.landlord_id !== req.user.id) throw forbidden();
   if (m.status !== 'open') throw badRequest('Request already processed', 'BAD_STATE');
-
-  const job = unwrap(await db.from('jobs').insert({
-    property_id: m.property_id, landlord_id: m.landlord_id, tenant_id: m.tenant_id, maintenance_request_id: m.id,
-    title: `${m.category} — ${m.description.slice(0, 40)}`, category: m.category, description: m.description,
-    urgency: b.urgency ?? m.urgency, budget_min_kobo: b.budgetMinKobo, budget_max_kobo: b.budgetMaxKobo, access_notes: b.accessNotes,
-  }).select().single());
-  const media = ((m as any).maintenance_media ?? []).map((x: any) => ({ job_id: job.id, kind: 'issue', url: x.url }));
-  if (media.length) await db.from('job_media').insert(media);
-  await db.from('maintenance_requests').update({ status: 'job_posted' }).eq('id', m.id);
-  await logMaintenance(m.id, req.user.id, 'job_posted', 'Ticket reviewed and posted to artisans');
-  await notify(m.tenant_id, 'maintenance_update', 'Repair approved', 'Your landlord is finding an artisan.', { requestId: m.id });
+  const job = await createJobForRequest(m, { payer: 'landlord', budgetMinKobo: b.budgetMinKobo, budgetMaxKobo: b.budgetMaxKobo, urgency: b.urgency, accessNotes: b.accessNotes });
+  await db.from('maintenance_requests').update({ status: 'job_posted', funding: 'landlord', funding_status: 'accepted' }).eq('id', m.id);
+  await logMaintenance(m.id, req.user.id, 'funding_accepted', 'Landlord agreed to pay — posted to artisans');
+  await notify(m.tenant_id, 'maintenance_update', 'Your landlord will pay for the repair', `${m.ticket_no ?? m.category}: they're finding an artisan now.`, { requestId: m.id });
   res.status(201).json({ job });
 });
 
-r.post('/:id/reject', requireRole('landlord', 'estate_manager'), async (req, res) => {
-  const { reason } = z.object({ reason: z.string().min(3) }).parse(req.body);
-  const { data: m } = await db.from('maintenance_requests').update({ status: 'rejected', rejection_reason: reason })
+/** Landlord declines paying. The request stays open: the tenant can pay themselves, edit and resend, or cancel. */
+async function declineFunding(req: any, res: any) {
+  const { reason } = z.object({ reason: z.string().trim().min(3).max(500) }).parse(req.body);
+  const { data: m } = await db.from('maintenance_requests').update({ funding_status: 'declined', funding_note: reason, rejection_reason: reason })
     .eq('id', req.params.id).eq('landlord_id', req.user.id).eq('status', 'open').select().maybeSingle();
   if (!m) throw notFound('Open request not found');
-  await logMaintenance(m.id, req.user.id, 'rejected', reason);
-  await notify(m.tenant_id, 'maintenance_update', 'Request declined', reason, { requestId: m.id });
+  await logMaintenance(m.id, req.user.id, 'funding_declined', `Landlord declined to pay: ${reason}`);
+  await notify(m.tenant_id, 'maintenance_update', 'Your landlord declined to pay', `${m.ticket_no ?? m.category}: “${reason}”. You can pay for it yourself, edit and resend, or cancel.`, { requestId: m.id });
   res.json({ request: m });
+}
+r.post('/:id/decline-funding', requireRole('landlord', 'estate_manager'), declineFunding);
+r.post('/:id/reject', requireRole('landlord', 'estate_manager'), declineFunding); // older app builds
+
+/** Tenant decides to pay themselves (instead of waiting, or after the landlord declined). */
+r.post('/:id/self-fund', requireRole('tenant'), async (req, res) => {
+  const b = z.object({ budgetMinKobo: kobo, budgetMaxKobo: kobo, accessNotes: z.string().max(500).optional() }).parse(req.body);
+  const { data: m } = await db.from('maintenance_requests').select('*').eq('id', req.params.id).eq('tenant_id', req.user.id).maybeSingle();
+  if (!m) throw notFound('Request not found');
+  if (m.status !== 'open' || m.created_by === 'landlord') throw badRequest('This request can no longer be changed', 'BAD_STATE');
+  const job = await createJobForRequest(m, { payer: 'tenant', budgetMinKobo: b.budgetMinKobo, budgetMaxKobo: b.budgetMaxKobo, accessNotes: b.accessNotes });
+  await db.from('maintenance_requests').update({ status: 'job_posted', funding: 'tenant', funding_status: null }).eq('id', m.id);
+  await logMaintenance(m.id, req.user.id, 'self_funded', 'Tenant chose to pay — posted to artisans');
+  await notify(m.landlord_id, 'maintenance_update', 'Your tenant will pay for the repair', `${m.ticket_no ?? m.category}: posted to artisans. You can view or cancel it.`, { requestId: m.id });
+  res.status(201).json({ job });
+});
+
+/** Tenant edits a declined request and asks the landlord again. */
+r.post('/:id/resubmit', requireRole('tenant'), async (req, res) => {
+  const b = z.object({ category: z.string().min(2).optional(), description: z.string().min(5).optional(), note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+  const { data: m } = await db.from('maintenance_requests').select('*').eq('id', req.params.id).eq('tenant_id', req.user.id).maybeSingle();
+  if (!m) throw notFound('Request not found');
+  if (m.status !== 'open' || m.funding_status !== 'declined') throw badRequest('Only a request your landlord declined can be resent', 'BAD_STATE');
+  await db.from('maintenance_requests').update({ ...(b.category ? { category: b.category } : {}), ...(b.description ? { description: b.description } : {}), funding: 'landlord', funding_status: 'pending', funding_note: null, rejection_reason: null }).eq('id', m.id);
+  await logMaintenance(m.id, req.user.id, 'resubmitted', b.note ? `Tenant edited and resent: ${b.note}` : 'Tenant edited and resent the request');
+  await notify(m.landlord_id, 'maintenance_request', 'Repair request resent', `${m.ticket_no ?? m.category}: your tenant updated it and asks you to pay again.`, { requestId: m.id });
+  res.json({ status: 'open', fundingStatus: 'pending' });
+});
+
+/** Cancel the order (rules in services/jobOrders.ts → cancelPolicy). Escrow is refunded to whoever paid. */
+r.post('/:id/cancel', async (req, res) => {
+  const { reason } = z.object({ reason: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+  const { data: m } = await db.from('maintenance_requests').select('*').eq('id', req.params.id).maybeSingle();
+  if (!m) throw notFound('Request not found');
+  const { data: job } = await db.from('jobs').select('*').eq('maintenance_request_id', m.id).neq('status', 'cancelled').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  res.json(await cancelOrder(req.user, m, job ?? null, reason));
 });
 
 export default r;

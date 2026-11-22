@@ -10,6 +10,7 @@ import { settleRent } from './rent';
 import { logForJob } from './maintenance';
 import { ensureConversation } from './conversations';
 import { settleBillPayment } from '../routes/bills.routes';
+import { tellParties } from './jobOrders';
 
 /**
  * Single entry point for confirming a Paystack payment (webhook AND client-side verify).
@@ -101,14 +102,20 @@ async function onJobEscrow(p: any) {
   // A repair the tenant asked for: they approve the work, so they get their own chat with the artisan.
   if (job.tenant_id) await ensureConversation('job', job.id, job.tenant_id, q.artisan_id);
   await notify(q.artisan_id, 'quote_accepted', 'Your quote was accepted! 🎉', `${job.title} — payment is held in escrow.`, { jobId: job.id });
+  // Tenant and landlord both follow every job order.
+  const { data: a } = await db.from('profiles').select('first_name, last_name').eq('id', q.artisan_id).maybeSingle();
+  const who = [a?.first_name, a?.last_name].filter(Boolean).join(' ') || 'An artisan';
+  await tellParties(job, null, 'maintenance_update', 'Artisan assigned', `${job.title}: ${who} was hired and ₦${(Number(q.amount_kobo) / 100).toLocaleString('en-NG')} is held in escrow.`, { jobId: job.id });
 }
 
-/** Landlord paid the extra amount for an approved higher final price: grow the escrow. */
+/** The payer paid the extra amount for an approved higher final price: grow the escrow. */
 async function onJobTopup(p: any) {
   const { data: e } = await db.from('escrows').select('*').eq('job_id', p.job_id).eq('kind', 'job').eq('status', 'held').single();
   if (!e) return;
   const newAmount = Number(e.amount_kobo) + Number(p.amount_kobo);
   await db.from('escrows').update({ amount_kobo: newAmount, fee_kobo: pct(newAmount, env.JOB_PLATFORM_FEE_PCT) }).eq('id', e.id);
   await db.from('jobs').update({ revision_status: 'approved' }).eq('id', p.job_id);
-  await notify(e.payee_id, 'revision_approved', 'Revised amount approved', 'The landlord approved your updated final cost.', { jobId: p.job_id });
+  await notify(e.payee_id, 'revision_approved', 'Revised amount approved', 'Your updated final cost was approved and paid into escrow.', { jobId: p.job_id });
+  const { data: job } = await db.from('jobs').select('id, title, landlord_id, tenant_id').eq('id', p.job_id).maybeSingle();
+  if (job) await tellParties(job, p.user_id, 'maintenance_update', 'Higher final price approved', `${job.title}: the difference was paid into escrow.`, { jobId: job.id });
 }

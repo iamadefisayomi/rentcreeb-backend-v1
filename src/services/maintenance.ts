@@ -3,7 +3,8 @@ import { logger } from '../lib/logger';
 
 export type MaintenanceEventKind =
   | 'submitted' | 'job_posted' | 'rejected' | 'assigned' | 'started' | 'estimate' | 'approved' | 'changes_requested'
-  | 'countered' | 'counter_accepted' | 'counter_declined' | 'completed_by_artisan' | 'resolved' | 'escalated' | 'priority_changed';
+  | 'countered' | 'counter_accepted' | 'counter_declined' | 'completed_by_artisan' | 'resolved' | 'escalated' | 'priority_changed'
+  | 'funding_requested' | 'funding_accepted' | 'funding_declined' | 'self_funded' | 'resubmitted' | 'cancelled' | 'created_by_landlord';
 
 /** Appends to a ticket's activity timeline (Figma "Ticket Detail" → Activity Timeline). Never throws. */
 export async function logMaintenance(requestId: string | null | undefined, actorId: string | null, kind: MaintenanceEventKind, note?: string) {

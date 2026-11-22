@@ -7,7 +7,8 @@ import { authenticate, requireRole, requireVerified } from '../middleware/auth';
 import { createPayment } from '../services/payments';
 import { reduceEscrow, releaseEscrow } from '../services/escrow';
 import { notify } from '../services/notify';
-import { logForJob } from '../services/maintenance';
+import { logForJob, logMaintenance } from '../services/maintenance';
+import { approverOf, cancelOrder, cancelPolicy, payerOf, tellParties } from '../services/jobOrders';
 
 const r = Router();
 r.use(authenticate);
@@ -25,33 +26,56 @@ async function getJob(id: string) {
 }
 const mustBeAssigned = (job: any, userId: string) => { if (job.artisan_id !== userId) throw forbidden('Job not assigned to you'); };
 const mustOwn = (job: any, userId: string) => { if (job.landlord_id !== userId) throw forbidden(); };
-/**
- * Whoever ordered the repair approves it: the tenant for a job raised from their maintenance request, otherwise the
- * landlord. The landlord still pays (quotes, escrow, top-ups) and sees every step; they are told about each decision.
- */
-export const approverOf = (job: { tenant_id?: string | null; landlord_id: string }) => job.tenant_id ?? job.landlord_id;
+export { approverOf } from '../services/jobOrders';
 const mustApprove = (job: any, userId: string) => {
-  if (approverOf(job) !== userId) throw forbidden(job.tenant_id ? 'The tenant who requested this repair approves it. You can follow every step here.' : undefined, 'NOT_APPROVER');
+  if (approverOf(job) !== userId) throw forbidden(job.created_by === 'landlord' ? 'Your landlord ordered this repair, so they approve it. You can follow every step here.' : job.tenant_id ? 'The tenant who ordered this repair approves it. You can follow every step here.' : undefined, 'NOT_APPROVER');
 };
-/** Keep the landlord in the loop when the tenant made the call. */
-const tellLandlord = async (job: any, actorId: string, title: string, body: string) => {
-  if (job.tenant_id && actorId !== job.landlord_id) await notify(job.landlord_id, 'maintenance_update', title, body, { jobId: job.id });
+/** Accepting quotes, paying and price revisions belong to whoever pays. */
+const mustPay = (job: any, userId: string) => {
+  if (payerOf(job) !== userId) throw forbidden(job.payer === 'tenant' ? 'Your tenant is paying for this repair, so they choose the artisan.' : 'Your landlord is paying for this repair, so they choose the artisan and pay.', 'NOT_PAYER');
 };
+const mustBeParty = (job: any, userId: string) => { if (![job.landlord_id, job.tenant_id].includes(userId)) throw forbidden(); };
+/** Keep the other side in the loop (tenant ↔ landlord). */
+const tellOther = (job: any, actorId: string | null, title: string, body: string) => tellParties(job, actorId, 'maintenance_update', title, body, { jobId: job.id });
 
 // ───────── Landlord: create / list / accept ─────────
+/**
+ * Landlord creates a job order. They approve and pay it. If the property has a tenant (or tenancyId names one), the
+ * tenant gets a linked ticket so they can follow it and is notified.
+ */
 r.post('/', requireRole(...LANDLORDS), requireVerified, async (req, res) => {
   const b = z.object({
     propertyId: uuid, title: z.string().min(3), category: z.string(), description: z.string().min(5),
     urgency: z.enum(['standard', 'urgent']).default('standard'), budgetMinKobo: kobo, budgetMaxKobo: kobo,
-    accessNotes: z.string().optional(), mediaUrls: z.array(z.string().url()).max(6).default([]),
+    accessNotes: z.string().optional(), mediaUrls: z.array(z.string().url()).max(6).default([]), tenancyId: uuid.optional(),
   }).parse(req.body);
   if (b.budgetMinKobo > b.budgetMaxKobo) throw badRequest('Min budget cannot exceed max');
   const { data: p } = await db.from('properties').select('owner_id').eq('id', b.propertyId).maybeSingle();
   if (!p || p.owner_id !== req.user.id) throw forbidden('Not your property');
+  let tq = db.from('tenancies').select('id, tenant_id, landlord_id').eq('property_id', b.propertyId).eq('landlord_id', req.user.id).eq('status', 'active').not('tenant_id', 'is', null);
+  if (b.tenancyId) tq = tq.eq('id', b.tenancyId);
+  const { data: tenancies } = await tq.limit(2);
+  const tenancy = (tenancies ?? []).length === 1 ? tenancies![0] : null; // several units: only when the landlord picked one
+  let ticket: any = null;
+  if (tenancy) {
+    const { data } = await db.from('maintenance_requests').insert({
+      tenancy_id: tenancy.id, property_id: b.propertyId, tenant_id: tenancy.tenant_id, landlord_id: req.user.id,
+      category: b.category, description: b.description, urgency: b.urgency, created_by: 'landlord', funding: 'landlord', funding_status: 'accepted', status: 'job_posted',
+    }).select().single();
+    ticket = data;
+  }
   const job = unwrap(await db.from('jobs').insert({
-    property_id: b.propertyId, landlord_id: req.user.id, title: b.title, category: b.category, description: b.description,
+    property_id: b.propertyId, landlord_id: req.user.id, tenant_id: tenancy?.tenant_id ?? null, maintenance_request_id: ticket?.id ?? null,
+    title: b.title, category: b.category, description: b.description, created_by: 'landlord', payer: 'landlord',
     urgency: b.urgency, budget_min_kobo: b.budgetMinKobo, budget_max_kobo: b.budgetMaxKobo, access_notes: b.accessNotes }).select().single());
-  if (b.mediaUrls.length) await db.from('job_media').insert(b.mediaUrls.map((url) => ({ job_id: job.id, kind: 'issue', url })));
+  if (b.mediaUrls.length) {
+    await db.from('job_media').insert(b.mediaUrls.map((url) => ({ job_id: job.id, kind: 'issue', url })));
+    if (ticket) await db.from('maintenance_media').insert(b.mediaUrls.map((url) => ({ request_id: ticket.id, url })));
+  }
+  if (ticket) {
+    await logMaintenance(ticket.id, req.user.id, 'created_by_landlord', 'Job order created by landlord — posted to artisans');
+    await notify(tenancy!.tenant_id, 'maintenance_update', 'Your landlord ordered a repair', `${b.title}. You can follow its progress in Maintenance.`, { requestId: ticket.id });
+  }
   res.status(201).json({ job });
   void alertMatchingArtisans(job, req.user.id);
 });
@@ -77,18 +101,18 @@ r.get('/mine', requireRole(...LANDLORDS), async (req, res) => {
 });
 
 /** Accepting a quote starts an escrow payment; the job is assigned once Paystack confirms. */
-r.post('/quotes/:quoteId/accept', requireRole(...LANDLORDS), requireVerified, async (req, res) => {
+r.post('/quotes/:quoteId/accept', requireVerified, async (req, res) => {
   const { data: q } = await db.from('job_quotes').select('*, jobs(*)').eq('id', req.params.quoteId).maybeSingle();
   if (!q) throw notFound('Quote not found');
   const job = (q as any).jobs;
-  mustOwn(job, req.user.id);
+  mustPay(job, req.user.id);
   if (job.status !== 'open' || q.status !== 'pending') throw conflict('This job already has an accepted quote', 'BAD_STATE');
   const payment = await createPayment(req.user, 'job_escrow', Number(q.amount_kobo), { job_id: job.id, quote_id: q.id });
   res.status(201).json({ payment });
 });
 
-r.get('/:id/quotes', requireRole(...LANDLORDS), async (req, res) => {
-  mustOwn(await getJob(String(req.params.id)), req.user.id);
+r.get('/:id/quotes', async (req, res) => {
+  mustBeParty(await getJob(String(req.params.id)), req.user.id);
   const { data } = await db.from('job_quotes').select('*, artisan:profiles!job_quotes_artisan_id_fkey(id, first_name, last_name, avatar_url, rating_avg, rating_count, artisan_profiles(skill_category, years_experience))')
     .eq('job_id', req.params.id).order('created_at');
   res.json({ quotes: data });
@@ -115,7 +139,7 @@ r.post('/:id/report/:decision', async (req, res) => {
     const naira = `₦${(amountKobo / 100).toLocaleString('en-NG')}`;
     await logForJob(job, req.user.id, 'countered', `${who === 'tenant' ? 'Tenant' : 'Landlord'} countered the estimate with ${naira}`);
     await notify(job.artisan_id, 'report_countered', 'Counter-offer on your estimate', `${job.title}: the ${who} offered ${naira}.${note ? ` “${note}”` : ''}`, { jobId: job.id });
-    await tellLandlord(job, req.user.id, 'Tenant countered the repair estimate', `${job.title}: offered ${naira}.`);
+    await tellOther(job, req.user.id, `${who === 'tenant' ? 'Tenant' : 'Landlord'} countered the repair estimate`, `${job.title}: offered ${naira}.`);
     return res.json({ status: 'countered' });
   }
   const approve = decisionParam === 'approve';
@@ -123,7 +147,7 @@ r.post('/:id/report/:decision', async (req, res) => {
   await db.from('jobs').update({ status: approve ? 'approved' : 'diagnosing' }).eq('id', job.id);
   await logForJob(job, req.user.id, approve ? 'approved' : 'changes_requested', approve ? `Repair estimate approved by ${who}` : (note ?? `${who === 'tenant' ? 'Tenant' : 'Landlord'} asked for a revised estimate`));
   await notify(job.artisan_id, approve ? 'report_approved' : 'report_rejected', approve ? 'Approved! 🎉' : 'Diagnosis needs changes', approve ? 'You may begin the repair.' : note ?? 'Please revise your report.', { jobId: job.id });
-  await tellLandlord(job, req.user.id, approve ? 'Tenant approved the repair' : 'Tenant asked for a revised estimate', `${job.title}${note ? `: “${note}”` : ''}`);
+  await tellOther(job, req.user.id, approve ? `${who === 'tenant' ? 'Tenant' : 'Landlord'} approved the repair` : `${who === 'tenant' ? 'Tenant' : 'Landlord'} asked for a revised estimate`, `${job.title}${note ? `: “${note}”` : ''}`);
   res.json({ status: approve ? 'approved' : 'diagnosing' });
 });
 
@@ -144,7 +168,7 @@ r.post('/:id/counter/:decision', requireRole('artisan'), async (req, res) => {
   await logForJob(job, req.user.id, accept ? 'counter_accepted' : 'counter_declined', accept ? 'Artisan accepted the counter-offer' : 'Artisan declined the counter-offer');
   await notify(approverOf(job), 'report_submitted', accept ? 'Counter-offer accepted' : 'Counter-offer declined',
     accept ? `${job.title}: the artisan will proceed at your price.` : `${job.title}: the artisan will send a revised estimate.`, { jobId: job.id });
-  await tellLandlord(job, approverOf(job), accept ? 'Counter-offer accepted' : 'Counter-offer declined', job.title);
+  await tellOther(job, approverOf(job), accept ? 'Counter-offer accepted' : 'Counter-offer declined', job.title);
   res.json({ status: accept ? 'approved' : 'diagnosing' });
 });
 
@@ -152,14 +176,15 @@ r.post('/:id/counter/:decision', requireRole('artisan'), async (req, res) => {
  * Landlord decides on the artisan's revised final amount.
  * Lower → difference refunded from escrow now. Higher → returns a Paystack top-up payment; escrow grows once paid.
  */
-r.post('/:id/revision/:decision', requireRole(...LANDLORDS), requireVerified, async (req, res) => {
+r.post('/:id/revision/:decision', requireVerified, async (req, res) => {
   const decision = z.enum(['approve', 'reject']).parse(req.params.decision);
   const job = await getJob(String(req.params.id));
-  mustOwn(job, req.user.id);
+  mustPay(job, req.user.id);
   if (job.revision_status !== 'pending') throw badRequest('No revision awaiting a decision', 'BAD_STATE');
   if (decision === 'reject') {
     await db.from('jobs').update({ revision_status: 'rejected' }).eq('id', job.id);
     await notify(job.artisan_id, 'revision_rejected', 'Revised amount declined', 'The original quote stands.', { jobId: job.id });
+    await tellOther(job, req.user.id, 'Revised amount declined', `${job.title}: the original quote stands.`);
     return res.json({ revisionStatus: 'rejected' });
   }
   const { data: e } = await db.from('escrows').select('id, amount_kobo').eq('job_id', job.id).eq('kind', 'job').eq('status', 'held').single();
@@ -168,6 +193,7 @@ r.post('/:id/revision/:decision', requireRole(...LANDLORDS), requireVerified, as
   if (diff < 0) {
     await reduceEscrow(e.id, Number(job.revised_amount_kobo));
     await db.from('jobs').update({ revision_status: 'approved' }).eq('id', job.id);
+    await tellOther(job, req.user.id, 'Lower final price approved', `${job.title}: ₦${(-diff / 100).toLocaleString('en-NG')} refunded to the payer.`);
     return res.json({ revisionStatus: 'approved', refundedKobo: -diff });
   }
   const payment = await createPayment(req.user, 'job_topup', diff, { job_id: job.id });
@@ -180,16 +206,24 @@ r.post('/:id/confirm-completion', async (req, res) => {
   const job = await getJob(String(req.params.id));
   mustApprove(job, req.user.id);
   if (job.status !== 'awaiting_confirmation') throw badRequest('Job is not awaiting confirmation', 'BAD_STATE');
-  if (['pending', 'awaiting_payment'].includes(job.revision_status)) throw conflict('A revised amount is awaiting the landlord’s decision', 'REVISION_PENDING');
+  if (['pending', 'awaiting_payment'].includes(job.revision_status)) throw conflict(`A revised amount is awaiting the ${job.payer === 'tenant' ? 'tenant' : 'landlord'}’s decision`, 'REVISION_PENDING');
   const { data: e } = await db.from('escrows').select('id').eq('job_id', job.id).eq('kind', 'job').eq('status', 'held').maybeSingle();
-  if (!e) throw conflict('No escrow found for this job');
+  if (!e) throw conflict('This repair hasn’t been paid into escrow yet, so there is no payment to release. Contact RentCreeb Support if you think this is wrong.', 'NO_ESCROW');
   const released = await releaseEscrow(e.id);
   await db.from('jobs').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', job.id);
   if (job.maintenance_request_id) await db.from('maintenance_requests').update({ status: 'completed', resolved_at: new Date().toISOString() }).eq('id', job.maintenance_request_id);
   await logForJob(job, req.user.id, 'resolved', `Completion confirmed by ${req.user.id === job.tenant_id ? 'tenant' : 'landlord'} — payment released to artisan`);
-  await tellLandlord(job, req.user.id, 'Repair completed', `${job.title}: the tenant confirmed the work and the artisan has been paid.`);
+  await tellOther(job, req.user.id, 'Repair completed', `${job.title}: the ${req.user.id === job.tenant_id ? 'tenant' : 'landlord'} confirmed the work and the artisan has been paid.`);
   await notify(job.artisan_id, 'payment_released', 'Payment released! 🎉', `₦${((released!.amount_kobo - released!.fee_kobo) / 100).toLocaleString()} credited to your wallet.`, { jobId: job.id });
   res.json({ status: 'completed' });
+});
+
+/** Cancel a job order (rules: services/jobOrders.ts → cancelPolicy). Escrow is refunded to whoever paid. */
+r.post('/:id/cancel', async (req, res) => {
+  const { reason } = z.object({ reason: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+  const job = await getJob(String(req.params.id));
+  const { data: m } = job.maintenance_request_id ? await db.from('maintenance_requests').select('*').eq('id', job.maintenance_request_id).maybeSingle() : { data: null };
+  res.json(await cancelOrder(req.user, m ?? null, job, reason));
 });
 
 /** Rate the other party after completion (landlord/tenant → artisan, artisan → landlord). */
@@ -291,7 +325,10 @@ r.get('/:id', async (req, res) => {
     db.from('jobs').select('id', { count: 'exact', head: true }).eq('landlord_id', job.landlord_id),
   ]);
   const { properties, ...rest } = job;
+  const parties = [job.landlord_id, job.tenant_id].includes(req.user.id);
+  const cancel = parties ? cancelPolicy(req.user.id, null, job) : { allowed: false };
   res.json({
+    viewer: parties ? { isPayer: payerOf(job) === req.user.id, isApprover: approverOf(job) === req.user.id, canCancel: cancel.allowed, cancelBlockedReason: cancel.allowed ? null : (cancel as any).reason ?? null } : null,
     job: { ...rest, property: privileged ? properties : { area: properties.area, lat: properties.lat, lng: properties.lng, property_type: properties.property_type, bedrooms: properties.bedrooms },
            access_notes: privileged ? job.access_notes : null },
     media: media.data, landlord: landlord.data ? { ...landlord.data, jobsPosted: posted.count ?? 0 } : landlord.data, quotesCount: quotes.count ?? 0, myQuote: myQuote.data, report: privileged ? report.data : null,
@@ -311,12 +348,12 @@ r.post('/:id/quotes', requireRole('artisan'), requireVerified, async (req, res) 
   }).parse(req.body);
   const job = await getJob(String(req.params.id));
   if (job.status !== 'open') throw badRequest('Job is no longer open', 'BAD_STATE');
-  if (b.amountKobo < job.budget_min_kobo || b.amountKobo > job.budget_max_kobo) throw badRequest('Your quote must be within the landlord’s budget range', 'OUT_OF_BUDGET');
+  if (b.amountKobo < job.budget_min_kobo || b.amountKobo > job.budget_max_kobo) throw badRequest('Your quote must be within the client’s budget range', 'OUT_OF_BUDGET');
   if (b.breakdown.length && b.breakdown.reduce((s, x) => s + x.amountKobo, 0) !== b.amountKobo) throw badRequest('Breakdown must add up to your quote', 'BAD_BREAKDOWN');
   const { data: dup } = await db.from('job_quotes').select('id').eq('job_id', job.id).eq('artisan_id', req.user.id).maybeSingle();
   if (dup) throw conflict('You already quoted this job');
   const quote = unwrap(await db.from('job_quotes').insert({ job_id: job.id, artisan_id: req.user.id, amount_kobo: b.amountKobo, breakdown: b.breakdown, eta: b.eta, notes: b.notes }).select().single());
-  await notify(job.landlord_id, 'new_quote', 'New quote received', `${job.title}: ₦${(b.amountKobo / 100).toLocaleString()}`, { jobId: job.id, quoteId: quote.id });
+  await notify(payerOf(job), 'new_quote', 'New quote received', `${job.title}: ₦${(b.amountKobo / 100).toLocaleString()}`, { jobId: job.id, quoteId: quote.id });
   res.status(201).json({ quote });
 });
 
@@ -327,7 +364,7 @@ r.post('/:id/start', requireRole('artisan'), async (req, res) => {
   if (job.status !== 'assigned') throw badRequest('Job cannot be started', 'BAD_STATE');
   await db.from('jobs').update({ status: 'diagnosing', started_at: new Date().toISOString() }).eq('id', job.id);
   await logForJob(job, req.user.id, 'started', 'Artisan started work on site');
-  await notify(job.landlord_id, 'job_started', 'Artisan has arrived', job.title, { jobId: job.id });
+  await tellParties(job, null, 'job_started', 'Artisan has arrived', job.title, { jobId: job.id });
   res.json({ status: 'diagnosing' });
 });
 
@@ -351,15 +388,16 @@ r.post('/:id/report', requireRole('artisan'), async (req, res) => {
   await db.from('jobs').update({ status: 'awaiting_approval' }).eq('id', job.id);
   await logForJob(job, req.user.id, 'estimate', `Artisan submitted repair estimate (₦${(total / 100).toLocaleString('en-NG')})`);
   await notify(approverOf(job), 'report_submitted', 'Diagnosis report submitted', 'Review and approve to let the artisan proceed.', { jobId: job.id });
-  if (job.tenant_id) await notify(job.landlord_id, 'maintenance_update', 'Diagnosis submitted', `${job.title}: waiting for the tenant to approve (₦${(total / 100).toLocaleString('en-NG')}).`, { jobId: job.id });
+  await tellOther(job, approverOf(job), 'Diagnosis submitted', `${job.title}: waiting for the ${approverOf(job) === job.tenant_id ? 'tenant' : 'landlord'} to approve (₦${(total / 100).toLocaleString('en-NG')}).`);
   res.status(201).json({ report });
 });
 
 r.post('/:id/begin-repair', requireRole('artisan'), async (req, res) => {
   const job = await getJob(String(req.params.id));
   mustBeAssigned(job, req.user.id);
-  if (job.status !== 'approved') throw badRequest(job.tenant_id ? 'The tenant must approve the estimate first' : 'Landlord approval required first', 'BAD_STATE');
+  if (job.status !== 'approved') throw badRequest(approverOf(job) === job.tenant_id ? 'The tenant must approve the estimate first' : 'Landlord approval required first', 'BAD_STATE');
   await db.from('jobs').update({ status: 'in_progress' }).eq('id', job.id);
+  await tellParties(job, null, 'maintenance_update', 'Repair work has started', job.title, { jobId: job.id });
   res.json({ status: 'in_progress' });
 });
 
@@ -372,9 +410,9 @@ r.post('/:id/complete', requireRole('artisan'), async (req, res) => {
   await db.from('job_media').insert(b.afterMediaUrls.map((url) => ({ job_id: job.id, kind: 'after', url })));
   const { data: quote } = await db.from('job_quotes').select('amount_kobo').eq('id', job.accepted_quote_id).single();
   const revised = b.revisedAmountKobo && b.revisedAmountKobo !== Number(quote?.amount_kobo) ? b.revisedAmountKobo : null;
-  if (revised && revised > Number(job.budget_max_kobo)) throw badRequest('Revised amount exceeds the landlord’s maximum budget', 'OUT_OF_BUDGET');
+  if (revised && revised > Number(job.budget_max_kobo)) throw badRequest('Revised amount exceeds the client’s maximum budget', 'OUT_OF_BUDGET');
   await db.from('jobs').update({ status: 'awaiting_confirmation', revised_amount_kobo: revised, revision_status: revised ? 'pending' : null, revision_note: b.notes ?? null }).eq('id', job.id);
-  if (revised) await notify(job.landlord_id, 'revision_requested', 'Artisan requested a revised amount', `${job.title}: ₦${(revised / 100).toLocaleString()}`, { jobId: job.id });
+  if (revised) await notify(payerOf(job), 'revision_requested', 'Artisan requested a revised amount', `${job.title}: ₦${(revised / 100).toLocaleString()}`, { jobId: job.id });
   await logForJob(job, req.user.id, 'completed_by_artisan', 'Artisan marked the repair complete');
   for (const uid of [job.tenant_id, job.landlord_id].filter(Boolean))
     await notify(uid, 'job_complete', 'Repair finished — please confirm', job.title, { jobId: job.id });
