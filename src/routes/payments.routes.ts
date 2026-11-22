@@ -88,7 +88,7 @@ async function ownPayment(id: string, userId: string) {
 }
 
 const who = (x: any) => (x ? `${x.first_name ?? ''} ${x.last_name ?? ''}`.trim() || null : null);
-const PURPOSE: Record<string, string> = { inspection: 'Inspection fee', rent: 'Rent payment', rentsave: 'RentSave deposit', job_escrow: 'Repair payment', job_topup: 'Repair top-up', subscription: 'Subscription', bill: 'Service charge / utility bill', utility: 'Bill payment' };
+const PURPOSE: Record<string, string> = { inspection: 'Inspection fee', rent: 'Rent payment', rentsave: 'RentSave deposit', job_escrow: 'Repair payment', job_topup: 'Repair top-up', subscription: 'Subscription', bill: 'Service charge / utility bill', utility: 'Bill payment', wallet_topup: 'Wallet top-up' };
 
 /** What the payment was for, who it went to, and whether the money is still held in escrow (Figma Transaction Detail 4508:9319). */
 async function receiptContext(p: any) {

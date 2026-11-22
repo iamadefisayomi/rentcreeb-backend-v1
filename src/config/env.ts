@@ -52,6 +52,10 @@ const schema = z.object({
   VTPASS_PUBLIC_KEY: z.string().optional(),
   /** Convenience fee added to each electricity / TV / internet / exam purchase (not airtime or data). */
   UTILITY_FEE_KOBO: z.coerce.number().int().min(0).default(0),
+  /** Wallet top-ups (any role): per top-up min / max and a rolling 24-hour total per user. Defaults ₦100 / ₦500,000 / ₦1,000,000. */
+  WALLET_FUND_MIN_KOBO: z.coerce.number().int().min(100).default(10_000),
+  WALLET_FUND_MAX_KOBO: z.coerce.number().int().min(100).default(50_000_000),
+  WALLET_FUND_DAILY_KOBO: z.coerce.number().int().min(100).default(100_000_000),
 
   BUNNY_STORAGE_HOST: z.string().default('storage.bunnycdn.com'),
   BUNNY_STORAGE_ZONE: z.string().min(1),

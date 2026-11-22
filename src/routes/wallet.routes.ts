@@ -6,6 +6,8 @@ import { paystack } from '../lib/paystack';
 import { badRequest, forbidden, HttpError } from '../lib/errors';
 import { fullName, kobo, paginate } from '../lib/common';
 import { authenticate, requireVerified } from '../middleware/auth';
+import { createPayment } from '../services/payments';
+import { env } from '../config/env';
 
 const r = Router();
 r.use(authenticate);
@@ -21,6 +23,25 @@ r.get('/', async (req, res) => {
 });
 
 r.get('/banks', async (_req, res) => res.json({ banks: await paystack.listBanks() }));
+
+/**
+ * Add money to the wallet (any role). Card / bank transfer / USSD through Paystack; the wallet is credited when the
+ * payment is confirmed (paymentProcessor.onWalletTopup). Identity verification and limits guard against stolen cards
+ * being cashed out through withdrawals.
+ */
+r.post('/fund', requireVerified, async (req, res) => {
+  const { amountKobo } = z.object({ amountKobo: kobo.min(env.WALLET_FUND_MIN_KOBO, `The minimum is ₦${(env.WALLET_FUND_MIN_KOBO / 100).toLocaleString('en-NG')}`)
+    .max(env.WALLET_FUND_MAX_KOBO, `The maximum per top-up is ₦${(env.WALLET_FUND_MAX_KOBO / 100).toLocaleString('en-NG')}`) }).parse(req.body);
+  if (amountKobo % 100) throw badRequest('Enter a whole naira amount');
+  const { data: today } = await db.from('payments').select('amount_kobo').eq('user_id', req.user.id).eq('purpose', 'wallet_topup').eq('status', 'success').gte('paid_at', new Date(Date.now() - 864e5).toISOString());
+  const used = (today ?? []).reduce((s, p) => s + Number(p.amount_kobo), 0);
+  if (used + amountKobo > env.WALLET_FUND_DAILY_KOBO) {
+    const left = Math.max(0, env.WALLET_FUND_DAILY_KOBO - used);
+    throw badRequest(left ? `You can add up to ₦${(left / 100).toLocaleString('en-NG')} more today` : 'You have reached today’s top-up limit. Try again tomorrow.', 'TOPUP_LIMIT');
+  }
+  const payment = await createPayment(req.user, 'wallet_topup', amountKobo);
+  res.status(201).json({ payment });
+});
 
 r.put('/bank-account', requireVerified, async (req, res) => {
   const b = z.object({ bankCode: z.string(), bankName: z.string().optional(), accountNumber: z.string().regex(/^\d{10}$/) }).parse(req.body);

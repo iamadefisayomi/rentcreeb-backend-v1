@@ -40,7 +40,7 @@ export async function confirmPayment(reference: string) {
   if (!payment) return { status: 'success', payment: existing }; // another worker won the race
 
   const handlers: Record<string, (p: any) => Promise<void>> = {
-    inspection: onInspection, subscription: onSubscription, rent: onRent, rentsave: onRentSave, job_escrow: onJobEscrow, job_topup: onJobTopup, bill: settleBillPayment, utility: onUtilityPayment,
+    inspection: onInspection, subscription: onSubscription, rent: onRent, rentsave: onRentSave, job_escrow: onJobEscrow, job_topup: onJobTopup, bill: settleBillPayment, utility: onUtilityPayment, wallet_topup: onWalletTopup,
   };
   try { await handlers[payment.purpose](payment); }
   catch (err) { logger.error({ err, reference }, 'post-payment handler failed'); }
@@ -75,6 +75,13 @@ async function onSubscription(p: any) {
     expires_at: addDays(now, (sub as any).billing_cycle === 'yearly' ? 365 : (sub as any).subscription_plans.interval_days).toISOString(),
   }).eq('id', sub.id);
   await notify(sub.agent_id, 'subscription_active', 'Plan activated', 'Your subscription is active. You can now list properties.');
+}
+
+/** Money added to the wallet by card / transfer. The wallet reference makes it credit exactly once. */
+async function onWalletTopup(p: any) {
+  await db.from('wallets').upsert({ user_id: p.user_id }, { onConflict: 'user_id', ignoreDuplicates: true });
+  const { data: credited } = await db.rpc('wallet_credit', { p_user: p.user_id, p_amount: Number(p.amount_kobo), p_kind: 'topup', p_desc: 'Wallet top-up', p_ref: `topup:${p.id}` });
+  if (credited) await notify(p.user_id, 'payment_success', 'Wallet funded 💰', `₦${(Number(p.amount_kobo) / 100).toLocaleString('en-NG')} was added to your RentCreeb wallet.`, { wallet: true });
 }
 
 async function onRent(p: any) {
