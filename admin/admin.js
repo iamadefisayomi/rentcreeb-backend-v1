@@ -1955,7 +1955,7 @@
 
   // ── templates ──
   PAGES['mail-templates'] = function () {
-    shell('mail-templates', 'Templates', 'Reusable email designs. Load one into a campaign or automation.', '<button class="btn primary" id="mt-add">New template</button>');
+    shell('mail-templates', 'Templates', 'Reusable email designs. Load one into a campaign or automation.', '<button class="btn" id="mt-starters">Add starter templates</button><button class="btn primary" id="mt-add">New template</button>');
     var tplForm = function (t) {
       t = t || {};
       return form({ title: t.id ? 'Edit template' : 'New template', wide: true, fields: [{ name: 'name', label: 'Name', value: t.name, required: true }, { name: 'subject', label: 'Subject line', value: t.subject }, { name: 'preheader', label: 'Preview text', value: t.preheader },
@@ -1964,7 +1964,10 @@
     api('/admin/mailing/templates').then(function (j) {
       view('<div class="card">' + table(['Template', 'Subject', 'Updated', ''], j.templates, function (t) {
         return '<tr><td><b>' + esc(t.name) + '</b></td><td>' + esc(t.subject || '') + '</td><td class="num">' + ago(t.updated_at) + '</td><td><div class="row" style="justify-content:flex-end"><button class="btn sm" data-prev="' + esc(t.id) + '">Preview</button><button class="btn sm" data-use="' + esc(t.id) + '">New campaign from it</button><button class="btn sm" data-edit="' + esc(t.id) + '">Edit</button><button class="btn sm ghost-danger" data-del="' + esc(t.id) + '">Delete</button></div></td></tr>';
-      }, 'No templates yet. Save one from the campaign editor, or create one here.') + '</div>');
+      }, 'No templates yet. Press “Add starter templates” for 7 ready-made emails, save one from the campaign editor, or create one here.') + '</div>');
+      on('mt-starters', function () {
+        post('/admin/mailing/templates/starters').then(function (o) { toast(o.added ? 'Added ' + o.added + ' starter template' + (o.added === 1 ? '' : 's') : 'All starter templates are already here'); route(); }).catch(function (e) { toast(e.message, true); });
+      });
       var byId = function (id) { return j.templates.filter(function (x) { return x.id === id; })[0]; };
       on('mt-add', function () { tplForm().then(function (v) { if (v) act(post('/admin/mailing/templates', v), 'Template saved'); }); });
       bind('[data-edit]', function (id) { tplForm(byId(id)).then(function (v) { if (v) act(api('/admin/mailing/templates/' + id, { method: 'PATCH', body: v }), 'Saved'); }); });

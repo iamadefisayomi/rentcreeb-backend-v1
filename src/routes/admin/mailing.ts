@@ -8,6 +8,7 @@ import {
   assertReady, isEmail, mailStatus, normalizeEmail, queueCampaign, render, resolveAudience, resubscribeContact, sendStats,
   sendTest, syncAppUsers, topLinks, unsubscribeContact, type Audience, type Content,
 } from '../../services/mailing';
+import { STARTER_TEMPLATES } from '../../services/mailingStarters';
 
 /**
  * Admin → Mailing: contacts, lists, templates, campaigns, automations, reports. See services/mailing.ts for the rules.
@@ -261,6 +262,16 @@ export function mountMailing(r: Router) {
   r.post('/mailing/templates', async (req, res) => {
     const b = templateSchema.parse(req.body);
     res.status(201).json({ template: unwrap(await db.from('mailing_templates').insert({ ...b, created_by: req.user.id }).select().single()) });
+  });
+  /** Adds the built-in starter templates (services/mailingStarters.ts). Skips any whose name already exists, so it's safe to press twice. */
+  r.post('/mailing/templates/starters', async (req, res) => {
+    const { data: existing, error } = await db.from('mailing_templates').select('name');
+    if (error) throw dbError(error);
+    const have = new Set((existing ?? []).map((t) => t.name.trim().toLowerCase()));
+    const fresh = STARTER_TEMPLATES.filter((t) => !have.has(t.name.toLowerCase())).map((t) => ({ ...t, created_by: req.user.id }));
+    if (fresh.length) { const ins = await db.from('mailing_templates').insert(fresh); if (ins.error) throw dbError(ins.error); }
+    await audit(req, 'mailing.templates_starters', 'mailing', null, { added: fresh.length });
+    res.json({ added: fresh.length, skipped: STARTER_TEMPLATES.length - fresh.length });
   });
   r.patch('/mailing/templates/:id', async (req, res) => {
     const b = templateSchema.partial().parse(req.body);
