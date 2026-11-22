@@ -45,6 +45,14 @@ const schema = z.object({
   PAYSTACK_SECRET_KEY: z.string().min(1),
   PAYSTACK_CALLBACK_URL: z.string().optional(),
 
+  /** Utility payments (airtime, data, electricity, TV…) via VTpass. Unset keys = the feature shows as "coming soon". */
+  VTPASS_BASE_URL: z.string().url().default('https://sandbox.vtpass.com/api').transform((u) => u.replace(/\/+$/, '')),
+  VTPASS_API_KEY: z.string().optional(),
+  VTPASS_SECRET_KEY: z.string().optional(),
+  VTPASS_PUBLIC_KEY: z.string().optional(),
+  /** Convenience fee added to each electricity / TV / internet / exam purchase (not airtime or data). */
+  UTILITY_FEE_KOBO: z.coerce.number().int().min(0).default(0),
+
   BUNNY_STORAGE_HOST: z.string().default('storage.bunnycdn.com'),
   BUNNY_STORAGE_ZONE: z.string().min(1),
   BUNNY_STORAGE_KEY: z.string().min(1),

@@ -7,6 +7,7 @@ import { reviewPendingListings } from '../services/listingReview';
 import { processMailQueue } from '../services/mailing';
 import { runSavedSearchAlerts } from '../routes/savedSearches.routes';
 import { markOverdueBills } from '../routes/bills.routes';
+import { requeryProcessing } from '../services/utilities';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
@@ -19,7 +20,10 @@ export function startScheduler() {
   // Every minute: mailing list queue (scheduled campaigns, automations, rate-limited delivery).
   cron.schedule('* * * * *', () => { void processMailQueue(); });
 
-  // Every 10 min: saved-search alerts for newly approved listings.
+  // Every 2 min: airtime / electricity / TV purchases VTpass hasn't confirmed yet (deliver or refund to wallet).
+cron.schedule('*/2 * * * *', () => { void requeryProcessing(); });
+
+// Every 10 min: saved-search alerts for newly approved listings.
   cron.schedule('*/10 * * * *', () => { void runSavedSearchAlerts(); });
 
   // Every 10 min: expire unpaid bookings and stale OTPs. An unpaid booking can be paid later from My Bookings or the

@@ -88,7 +88,7 @@ async function ownPayment(id: string, userId: string) {
 }
 
 const who = (x: any) => (x ? `${x.first_name ?? ''} ${x.last_name ?? ''}`.trim() || null : null);
-const PURPOSE: Record<string, string> = { inspection: 'Inspection fee', rent: 'Rent payment', rentsave: 'RentSave deposit', job_escrow: 'Repair payment', job_topup: 'Repair top-up', subscription: 'Subscription', bill: 'Service charge / utility bill' };
+const PURPOSE: Record<string, string> = { inspection: 'Inspection fee', rent: 'Rent payment', rentsave: 'RentSave deposit', job_escrow: 'Repair payment', job_topup: 'Repair top-up', subscription: 'Subscription', bill: 'Service charge / utility bill', utility: 'Bill payment' };
 
 /** What the payment was for, who it went to, and whether the money is still held in escrow (Figma Transaction Detail 4508:9319). */
 async function receiptContext(p: any) {
@@ -114,6 +114,10 @@ async function receiptContext(p: any) {
   if (p.bill_item_id) {
     const { data: it } = await db.from('bill_items').select('unit_label, bill:bills(title, period_label, property:properties(id, title, address), landlord:profiles!bills_landlord_id_fkey(first_name, last_name))').eq('id', p.bill_item_id).maybeSingle();
     const x: any = it?.bill; if (x) { ctx.property = x.property; ctx.counterparty = who(x.landlord); ctx.counterpartyRole = 'Landlord'; ctx.description = [x.title, x.period_label, it?.unit_label].filter(Boolean).join(' · '); }
+  }
+  if (p.utility_order_id) {
+    const { data: u } = await db.from('utility_orders').select('id, provider_name, variation_name, customer_id, customer_name, status').eq('id', p.utility_order_id).maybeSingle();
+    if (u) { ctx.title = [u.provider_name, u.variation_name].filter(Boolean).join(' · '); ctx.counterparty = u.provider_name; ctx.counterpartyRole = 'Biller'; ctx.description = [u.customer_name, u.customer_id].filter(Boolean).join(' · '); (ctx.links as any).utilityOrderId = u.id; }
   }
   if (p.rentsave_plan_id) {
     const { data: r } = await db.from('rentsave_plans').select('id, name').eq('id', p.rentsave_plan_id).maybeSingle();
