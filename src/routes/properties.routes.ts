@@ -549,6 +549,21 @@ r.post('/:id/media', authenticate, requireRole(...LISTER_ROLES), async (req, res
   res.status(201).json({ media: saved });
 });
 
+/** Reorder photos/videos: `ids` in the new order. The first photo is the cover everywhere. Ids not listed keep their order after these. */
+r.put('/:id/media/order', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
+  const p = await assertOwner(String(req.params.id), req.user.id);
+  const { ids } = z.object({ ids: z.array(z.string().uuid()).min(1).max(60) }).parse(req.body);
+  const { data: rows } = await db.from('property_media').select('id, position').eq('property_id', p.id).order('position');
+  const known = new Set((rows ?? []).map((m) => m.id));
+  const ordered = [...new Set(ids)].filter((id) => known.has(id));
+  const rest = (rows ?? []).map((m) => m.id).filter((id) => !ordered.includes(id));
+  const final = [...ordered, ...rest];
+  await Promise.all(final.map((id, i) => db.from('property_media').update({ position: i }).eq('id', id).eq('property_id', p.id)));
+  await db.from('properties').update({ updated_at: new Date().toISOString() }).eq('id', p.id);
+  const media = unwrap(await db.from('property_media').select('id, url, media_type, position').eq('property_id', p.id).order('position'));
+  res.json({ media });
+});
+
 r.delete('/:id/media/:mediaId', authenticate, requireRole(...LISTER_ROLES), async (req, res) => {
   await assertOwner(String(req.params.id), req.user.id);
   const { data } = await db.from('property_media').delete().eq('id', req.params.mediaId).eq('property_id', req.params.id).select().maybeSingle();
