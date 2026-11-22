@@ -6,6 +6,7 @@ import { mountContent } from './admin/content';
 import { mountMoney } from './admin/money';
 import { mountMailing } from './admin/mailing';
 import { mountAssistant } from './admin/assistant';
+import { mountWaitlist } from './admin/waitlist';
 
 /**
  * Admin API, used by the web dashboard served at /admin (backend/admin).
@@ -15,6 +16,7 @@ import { mountAssistant } from './admin/assistant';
  *   people:   users, ID verification review, artisan applications, internal notes
  *   content:  listings, reviews, reports, conversations (audited), support tickets, app feedback
  *   mailing:  contacts, lists, templates, campaigns, automations (see services/mailing.ts)
+ *   waitlist: website waitlist sign-ups (mailing contacts tagged "waitlist")
  *   money:    finance, payments, bookings, escrow, withdrawals, subscriptions & plans, tenancies, RentSave, jobs
  */
 const r = Router();
@@ -27,5 +29,6 @@ mountContent(r);
 mountMoney(r);
 mountMailing(r);
 mountAssistant(r);
+mountWaitlist(r);
 
 export default r;

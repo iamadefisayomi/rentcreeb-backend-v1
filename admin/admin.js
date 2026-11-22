@@ -193,7 +193,7 @@
     ['Dashboard', [['overview', 'Overview'], ['system', 'System & settings']]],
     ['Review queues', [['verifications', 'ID verification', 'manualVerifications'], ['listings', 'Listings', 'pendingProperties'], ['artisans', 'Artisans', 'pendingArtisans'],
       ['reports', 'Reports', 'openReports'], ['reviews', 'Reviews', 'flaggedReviews'], ['support', 'Support', 'openTickets'], ['feedback', 'App feedback']]],
-    ['People', [['users', 'Users']]],
+    ['People', [['users', 'Users'], ['waitlist', 'Waitlist']]],
     ['Money', [['finance', 'Finance'], ['payments', 'Payments', 'stuckPayments'], ['bookings', 'Bookings'], ['escrow', 'Escrow'], ['withdrawals', 'Withdrawals', 'pendingWithdrawals'], ['subscriptions', 'Subscriptions & plans']]],
     ['Operations', [['tenancies', 'Tenancies'], ['jobs', 'Jobs'], ['rentsave', 'RentSave']]],
     ['Mailing', [['mailing', 'Overview'], ['mail-campaigns', 'Campaigns'], ['mail-automations', 'Automations'], ['mail-contacts', 'Contacts'], ['mail-lists', 'Lists & sign-up form'], ['mail-templates', 'Templates']]],
@@ -211,6 +211,7 @@
     reviews: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z',
     support: 'M3 14v-2a9 9 0 0 1 18 0v2M21 14v3a2 2 0 0 1-2 2h-1v-6h3zM3 14v3a2 2 0 0 0 2 2h1v-6H3z',
     feedback: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12zM8.5 13.5s1.2 1.5 3.5 1.5 3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01',
+    waitlist: 'M9 3h6v3H9zM6 4H5a1 1 0 0 0-1 1v15a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1h-1M8 12h8M8 16h5',
     users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8',
     finance: 'M3 3v18h18M7 15v2M11 11v6M15 7v10M19 12v5',
     payments: 'M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2zM2 10h20M6 15h4',
@@ -1030,6 +1031,55 @@
         }, 'No feedback yet.') + '</div>' + pager(page, j.total, r.raw));
     }).catch(fail);
   };
+
+  // ═════════ Waitlist ═════════
+  // Website "Join the waitlist" sign-ups (mailing contacts tagged "waitlist"). API: src/routes/admin/waitlist.ts.
+  var WL_STATUS = [['pending', 'Pending'], ['contacted', 'Contacted'], ['invited', 'Invited'], ['joined', 'Joined the app'], ['declined', 'Not interested']];
+  var WL_TONE = { pending: 'warn', contacted: '', invited: '', joined: 'ok', declined: 'grey' };
+  function wlLabel(s) { var f = WL_STATUS.filter(function (x) { return x[0] === s; })[0]; return f ? f[1] : s; }
+  PAGES.waitlist = function (r) {
+    var page = Number(r.q.page || 1); var f = { q: r.q.q, status: r.q.status };
+    shell('waitlist', 'Waitlist', 'People who joined the waitlist on rentcreeb.com.', '<button class="btn sm" id="wl-export">Export CSV</button>');
+    api('/admin/waitlist' + qs(Object.assign({ page: page, limit: PAGE }, f))).then(function (j) {
+      var s = j.summary; var items = j.items;
+      var stat = function (n, l) { return '<div class="card stat"><span class="n">' + num(n) + '</span><span class="l">' + esc(l) + '</span></div>'; };
+      view('<div class="grid cols-4" style="margin-bottom:16px">' + stat(s.total, 'On the waitlist') + stat(s.lastWeek, 'Joined in the last 7 days') + stat(s.byStatus.pending || 0, 'Not contacted yet') + stat(s.byStatus.joined || 0, 'Joined the app') + '</div>' +
+        tabs([['', 'All', String(s.total)]].concat(WL_STATUS.map(function (x) { return [x[0], x[1], String(s.byStatus[x[0]] || 0)]; })), f.status || '', function (t) { return '/waitlist' + qs({ q: f.q, status: t }); }) +
+        '<form class="row" id="wlf" style="margin:12px 0"><input class="input" name="q" placeholder="Search name or email" value="' + esc(f.q || '') + '"><button class="btn">Search</button></form>' +
+        '<div class="card">' + table(['Joined', 'Person', 'I am', 'Interested in', 'Location', 'Status', ''], items, function (x, i) {
+          return '<tr class="click" data-wl="' + i + '"><td class="num">' + when(x.createdAt) + '</td><td><b>' + esc(x.name || '—') + '</b><div class="faint">' + esc(x.email) + (x.phone ? ' · ' + esc(x.phone) : '') + '</div></td>' +
+            '<td>' + esc(x.iAm || '—') + '</td><td><div class="chips">' + x.interest.map(function (t) { return badge(t, 'grey'); }).join('') + '</div></td>' +
+            '<td class="faint">' + esc([x.city, x.lga, x.state].filter(Boolean).join(', ') || '—') + '</td><td>' + badge(wlLabel(x.status), WL_TONE[x.status]) + (x.notes ? ' <span class="faint" title="Has notes">✎</span>' : '') + '</td>' +
+            '<td><button class="btn sm" data-wl="' + i + '">Open</button></td></tr>';
+        }, f.q || f.status ? 'Nobody matches.' : 'Nobody has joined the waitlist yet.') + '</div>' + pager(page, j.total, r.raw));
+      $('#wlf').onsubmit = function (e) { e.preventDefault(); location.hash = '#/waitlist' + qs({ q: e.target.q.value.trim(), status: f.status }); };
+      bind('[data-wl]', function (i) { waitlistEntry(items[Number(i)]); });
+    }).catch(fail);
+    on('wl-export', function () { download('/admin/waitlist.csv' + qs(f), 'rentcreeb-waitlist.csv'); });
+  };
+  function waitlistEntry(x) {
+    var rowOf = function (k, v) { return v ? '<div class="row between" style="gap:12px;padding:6px 0;border-bottom:1px solid var(--line, #e5e7eb)"><span class="faint">' + esc(k) + '</span><span style="text-align:right">' + v + '</span></div>' : ''; };
+    var info = '<div style="margin:8px 0 4px">' + rowOf('Email', '<a href="mailto:' + esc(x.email) + '">' + esc(x.email) + '</a>') + rowOf('Phone', x.phone ? '<a href="tel:' + esc(x.phone) + '">' + esc(x.phone) + '</a>' : '') +
+      rowOf('I am', esc(x.iAm)) + rowOf('Interested in', esc(x.interest.join(', '))) + rowOf('Location', esc([x.city, x.lga, x.state].filter(Boolean).join(', '))) +
+      rowOf('Joined', when(x.createdAt)) + rowOf('Source', esc(x.source)) + rowOf('Mailing', x.mailStatus ? '<a href="#/mail-contacts/' + esc(x.id) + '">' + label(x.mailStatus) + '</a>' : '') +
+      (x.message ? '<div style="padding:8px 0"><div class="faint">Message</div><div style="white-space:pre-wrap">' + esc(x.message) + '</div></div>' : '') + '</div>';
+    form({ title: x.name || x.email, wide: true, html: info, confirm: 'Save',
+      fields: [{ name: 'status', label: 'Status', type: 'select', options: WL_STATUS, value: x.status }, { name: 'notes', label: 'Internal notes', type: 'textarea', value: x.notes, placeholder: 'e.g. Called on Monday, wants a 2-bed in Lekki' }] }).then(function (v) {
+      if (!v) return;
+      act(api('/admin/waitlist/' + encodeURIComponent(x.id), { method: 'PATCH', body: { status: v.status, notes: v.notes || '' } }), 'Saved');
+    });
+    var foot = $('.modal .sticky-actions');
+    if (foot) {
+      var rm = document.createElement('button'); rm.type = 'button'; rm.className = 'btn danger'; rm.textContent = 'Remove from waitlist'; rm.style.marginRight = 'auto';
+      rm.onclick = function () {
+        $('#m-cancel').click(); // closes the entry dialog properly before the confirmation opens
+        form({ title: 'Remove ' + (x.name || x.email) + ' from the waitlist?', body: 'They stay on the mailing list. This does not email them.', confirm: 'Remove', danger: true }).then(function (ok) {
+          if (ok) act(api('/admin/waitlist/' + encodeURIComponent(x.id), { method: 'DELETE' }), 'Removed from the waitlist');
+        });
+      };
+      foot.insertBefore(rm, foot.firstChild);
+    }
+  }
 
   // ═════════ Users ═════════
   var ROLES = [['tenant', 'Tenant'], ['landlord', 'Landlord'], ['estate_manager', 'Estate manager'], ['agent', 'Agent'], ['artisan', 'Artisan'], ['admin', 'Admin']];
