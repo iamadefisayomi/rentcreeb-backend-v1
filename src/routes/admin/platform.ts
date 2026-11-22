@@ -49,7 +49,7 @@ export function mountPlatform(r: Router) {
     const [
       users, newUsers7d, tenants, landlords, agents, artisans, suspended, verified,
       pendingProperties, liveProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews,
-      pendingWithdrawals, stuckPayments, heldEscrows, bookings7d, activeSubs, pay30, escrowHeld, signups30, recent,
+      pendingWithdrawals, stuckPayments, heldEscrows, bookings7d, activeSubs, pay30, escrowHeld, signups30, recent, scamAlerts,
     ] = await Promise.all([
       count('profiles', (q) => q.is('deleted_at', null)), count('profiles', (q) => q.gte('created_at', d7)),
       count('profiles', (q) => q.eq('role', 'tenant')), count('profiles', (q) => q.in('role', ['landlord', 'estate_manager'])),
@@ -66,11 +66,12 @@ export function mountPlatform(r: Router) {
       db.from('escrows').select('amount_kobo').eq('status', 'held').limit(20000),
       db.from('profiles').select('created_at').gte('created_at', d30).limit(20000),
       db.from('admin_actions').select('id, action, target_type, target_id, details, created_at, admin:profiles!admin_actions_admin_id_fkey(first_name, last_name)').order('created_at', { ascending: false }).limit(12),
+      count('scam_alerts', (q) => q.in('status', ['open', 'reported'])),
     ]);
     const settings = await getSettings();
     res.json({
       users: { total: users, new7d: newUsers7d, tenants, landlords, agents, artisans, suspended, verified },
-      queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, pendingWithdrawals, stuckPayments },
+      queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, pendingWithdrawals, stuckPayments, scamAlerts },
       activity: { liveProperties, bookings7d, activeSubscriptions: activeSubs, paymentsKobo30d: sumKobo(pay30.data), escrowHeldKobo: sumKobo(escrowHeld.data), heldEscrows },
       trends: { signups: dailySeries(signups30.data ?? [], 30), paymentsKobo: dailySeries(pay30.data ?? [], 30, (p) => Number(p.amount_kobo)) },
       settings: { maintenanceMode: settings.maintenanceMode, banner: settings.banner },
@@ -115,6 +116,8 @@ export function mountPlatform(r: Router) {
           ['018 mailing list', probe('mailing_contacts')],
           ['019 listing video links', probe('properties', 'video_urls')],
           ['020 assistant & live agents', probe('assistant_conversations')],
+          ['023 website (slugs, legacy ids)', probe('properties', 'legacy_id')],
+          ['024 scam alerts', probe('scam_alerts')],
         ];
         return Promise.all(checks.map(async ([name, p]) => ({ name, applied: await p })));
       })(),

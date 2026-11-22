@@ -12,6 +12,7 @@ import { PRIVACY_DEFAULTS } from './support.routes';
 import { ensureConversation } from '../services/conversations';
 import { SUPPORT_PERSON, onUserSupportMessage } from '../services/supportChat';
 import { removePhoneNumbers } from '../lib/webAuth';
+import { screenMessage } from '../services/scamGuard';
 
 const r = Router();
 r.use(authenticate);
@@ -173,6 +174,31 @@ r.post('/:id/messages', async (req, res) => {
   if (c.context_type === 'support') await onUserSupportMessage(c.context_id, b.body?.trim() || preview, req.user);
   else if (other) await notify(other, 'message', fullName(req.user) || 'New message', preview, { conversationId: c.id });
   res.status(201).json({ message: msg });
+  // Scam screening runs after the reply so sending never waits on it (services/scamGuard.ts).
+  if (c.context_type !== 'support') void screenMessage(c, msg);
+});
+
+/** Scam warnings for me in this chat (the person who sent the flagged messages never sees them). */
+r.get('/:id/safety', async (req, res) => {
+  await getConv(req.params.id, req.user.id);
+  const { data, error } = await db.from('scam_alerts').select('id, message_id, risk, category, reason, status, created_at')
+    .eq('conversation_id', req.params.id).eq('recipient_id', req.user.id).in('status', ['open', 'reported', 'confirmed'])
+    .order('created_at', { ascending: false }).limit(5);
+  res.json({ alerts: error ? [] : data ?? [] });
+});
+
+/** "Report" (sends it to the RentCreeb team as urgent) or "It's fine" (hides the warning). */
+r.post('/:id/safety/:alertId', async (req, res) => {
+  await getConv(req.params.id, req.user.id);
+  const { action, note } = z.object({ action: z.enum(['report', 'dismiss']), note: z.string().trim().max(1000).optional() }).parse(req.body ?? {});
+  const { data: a } = await db.from('scam_alerts').select('id, status, admin_note').eq('id', req.params.alertId).eq('conversation_id', req.params.id).eq('recipient_id', req.user.id).maybeSingle();
+  if (!a) throw notFound('Alert not found');
+  if (a.status === 'confirmed' && action === 'dismiss') return res.json({ ok: true }); // the team already confirmed it: keep the warning
+  await db.from('scam_alerts').update({
+    status: action === 'report' ? 'reported' : 'dismissed', user_action_at: new Date().toISOString(),
+    ...(note ? { admin_note: [a.admin_note, `User: ${note}`].filter(Boolean).join('\n') } : {}),
+  }).eq('id', a.id);
+  res.json({ ok: true });
 });
 
 r.get('/:id/messages/:messageId', async (req, res) => {

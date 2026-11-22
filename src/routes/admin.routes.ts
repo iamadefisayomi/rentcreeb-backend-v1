@@ -7,6 +7,7 @@ import { mountMoney } from './admin/money';
 import { mountMailing } from './admin/mailing';
 import { mountAssistant } from './admin/assistant';
 import { mountWaitlist } from './admin/waitlist';
+import { mountScam } from './admin/scam';
 
 /**
  * Admin API, used by the web dashboard served at /admin (backend/admin).
@@ -17,6 +18,7 @@ import { mountWaitlist } from './admin/waitlist';
  *   content:  listings, reviews, reports, conversations (audited), support tickets, app feedback
  *   mailing:  contacts, lists, templates, campaigns, automations (see services/mailing.ts)
  *   waitlist: website waitlist sign-ups (mailing contacts tagged "waitlist")
+ *   scam:     scam alerts raised in chats (services/scamGuard.ts)
  *   money:    finance, payments, bookings, escrow, withdrawals, subscriptions & plans, tenancies, RentSave, jobs
  */
 const r = Router();
@@ -30,5 +32,6 @@ mountMoney(r);
 mountMailing(r);
 mountAssistant(r);
 mountWaitlist(r);
+mountScam(r);
 
 export default r;

@@ -192,7 +192,7 @@
   var NAV = [
     ['Dashboard', [['overview', 'Overview'], ['system', 'System & settings']]],
     ['Review queues', [['verifications', 'ID verification', 'manualVerifications'], ['listings', 'Listings', 'pendingProperties'], ['artisans', 'Artisans', 'pendingArtisans'],
-      ['reports', 'Reports', 'openReports'], ['reviews', 'Reviews', 'flaggedReviews'], ['support', 'Support', 'openTickets'], ['feedback', 'App feedback']]],
+      ['reports', 'Reports', 'openReports'], ['scam', 'Scam alerts', 'scamAlerts'], ['reviews', 'Reviews', 'flaggedReviews'], ['support', 'Support', 'openTickets'], ['feedback', 'App feedback']]],
     ['People', [['users', 'Users'], ['waitlist', 'Waitlist']]],
     ['Money', [['finance', 'Finance'], ['payments', 'Payments', 'stuckPayments'], ['bookings', 'Bookings'], ['escrow', 'Escrow'], ['withdrawals', 'Withdrawals', 'pendingWithdrawals'], ['subscriptions', 'Subscriptions & plans']]],
     ['Operations', [['tenancies', 'Tenancies'], ['jobs', 'Jobs'], ['rentsave', 'RentSave']]],
@@ -208,6 +208,7 @@
     listings: 'M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z',
     artisans: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z',
     reports: 'M4 22V4M4 4h12l-2 4 2 4H4',
+    scam: 'M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6zM12 8v5M12 16h.01',
     reviews: 'M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z',
     support: 'M3 14v-2a9 9 0 0 1 18 0v2M21 14v3a2 2 0 0 1-2 2h-1v-6h3zM3 14v3a2 2 0 0 0 2 2h1v-6H3z',
     feedback: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12zM8.5 13.5s1.2 1.5 3.5 1.5 3.5-1.5 3.5-1.5M9 9.5h.01M15 9.5h.01',
@@ -471,7 +472,7 @@
       var banner = o.settings && o.settings.banner ? '<div class="alert info" style="margin-bottom:14px">App banner showing: “' + esc(o.settings.banner.message) + '” · <a href="#/system">edit</a></div>' : '';
       view(banner + '<h2 class="section-title">Queues</h2><div class="grid cols-4">' +
         card(q.manualVerifications, 'ID checks needing review', '#/verifications', 1) + card(q.pendingProperties, 'Listings awaiting approval', '#/listings', 1) +
-        card(q.pendingArtisans, 'Artisan applications', '#/artisans', 1) + card(q.openReports, 'Open reports', '#/reports', 1) +
+        card(q.pendingArtisans, 'Artisan applications', '#/artisans', 1) + card(q.openReports, 'Open reports', '#/reports', 1) + card(q.scamAlerts || 0, 'Scam alerts to review', '#/scam', 1) +
         card(q.flaggedReviews, 'Flagged reviews', '#/reviews', 1) + card(q.openTickets, 'Open support tickets', '#/support', 1) +
         card(q.pendingWithdrawals, 'Withdrawals pending over 1h', '#/withdrawals?tab=pending', 1) + card(q.stuckPayments, 'Payments stuck at pending', '#/payments?status=pending', 1) + '</div>' +
         '<h2 class="section-title">Platform</h2><div class="grid cols-4">' +
@@ -1016,6 +1017,50 @@
     }, function (on) { liveOn = on; paintTyping(); if (on) refresh(); });
     pageTimer = setInterval(function () { if (document.visibilityState === 'visible' && !$('#modal-root').innerHTML) load().catch(function () {}); }, liveOn ? 60000 : 30000);
   }
+
+  // ═════════ Scam alerts ═════════
+  // Warnings raised in chats by services/scamGuard.ts. The warned person sees them in the chat; the suspect never does.
+  var SCAM_CAT = { off_platform_payment: 'Payment outside RentCreeb', advance_fee: 'Money before inspection', credential_phishing: 'Asked for OTP / PIN / password', fake_listing: 'Fake listing story',
+    impersonation: 'Pretends to be RentCreeb', off_platform_contact: 'Moving off RentCreeb', pressure: 'Pressure to pay', other: 'Other' };
+  var SCAM_STATUS = { open: ['New', 'warn'], reported: ['Reported by user', 'bad'], dismissed: ['User said it’s fine', 'grey'], confirmed: ['Confirmed scam', 'bad'], cleared: ['False alarm', 'ok'] };
+  PAGES.scam = function (r) {
+    var page = Number(r.q.page || 1); var tab = r.q.tab || 'todo';
+    shell('scam', 'Scam alerts', 'Chats where the AI spotted a likely scam. The person at risk was warned in the chat.');
+    api('/admin/scam-alerts' + qs({ tab: tab, page: page, limit: PAGE })).then(function (j) {
+      if (j.missing) return view('<div class="err">Run migration 024_scam_alerts.sql in Supabase to turn on scam alerts.</div>');
+      var c = j.counts || {};
+      view(tabs([['todo', 'To review', String((c.open || 0) + (c.reported || 0))], ['reported', 'Reported by user', String(c.reported || 0)], ['confirmed', 'Confirmed'], ['cleared', 'False alarms'], ['dismissed', 'User said fine'], ['all', 'All']], tab, function (t) { return '/scam' + qs({ tab: t }); }) +
+        '<div class="card">' + table(['When', 'Risk', 'Suspect', 'Warned', 'What was said', 'Status', ''], j.alerts, function (a) {
+          var st = SCAM_STATUS[a.status] || [a.status, ''];
+          var sus = a.suspect ? userLink(a.suspect) + '<div class="chips">' + (a.suspect.is_suspended ? badge('Suspended', 'bad') : '') + (a.suspectAlertCount > 1 ? badge(a.suspectAlertCount + ' alerts', 'bad') : '') + '</div>' : '—';
+          return '<tr><td class="num">' + when(a.created_at) + '</td><td>' + badge(a.risk === 'high' ? 'High' : 'Medium', a.risk === 'high' ? 'bad' : 'warn') + '<div class="faint">' + esc(SCAM_CAT[a.category] || label(a.category)) + '</div><div class="faint">' + (a.source === 'ai' ? 'AI' : 'Rules') + '</div></td>' +
+            '<td>' + sus + '</td><td>' + userLink(a.recipient) + '</td>' +
+            '<td style="max-width:360px"><div style="white-space:pre-wrap">' + esc((a.excerpt || '').slice(0, 300)) + '</div><div class="faint" style="margin-top:6px">Warning shown: ' + esc(a.reason) + '</div>' +
+            ((a.signals || []).length ? '<div class="chips" style="margin-top:6px">' + a.signals.map(function (x) { return badge(x, 'grey'); }).join('') + '</div>' : '') +
+            (a.admin_note ? '<div class="faint" style="margin-top:6px;white-space:pre-wrap">' + esc(a.admin_note) + '</div>' : '') + '</td>' +
+            '<td>' + badge(st[0], st[1]) + '</td>' +
+            '<td><div class="row" style="justify-content:flex-end;flex-wrap:wrap;gap:6px"><button class="btn sm" data-conv="' + esc(a.conversation_id) + '">Read chat</button>' +
+            (a.status !== 'confirmed' ? '<button class="btn sm danger" data-sconfirm="' + esc(a.id) + '">Confirm scam</button>' : '') +
+            (a.status !== 'cleared' ? '<button class="btn sm" data-sclear="' + esc(a.id) + '">False alarm</button>' : '') + '</div></td></tr>';
+        }, tab === 'todo' ? 'Nothing to review. 🎉' : 'No alerts here.') + '</div>' + pager(page, j.total, r.raw));
+      bind('[data-conv]', function (id) { openConversation(id); });
+      bind('[data-sconfirm]', function (id) {
+        var a = j.alerts.filter(function (x) { return x.id === id; })[0];
+        form({ title: 'Confirm this was a scam?', body: 'The warned person is told it was confirmed. To stop the suspect, suspend them from their user page.', confirm: 'Confirm scam', danger: true,
+          fields: [{ name: 'note', label: 'Note (kept with the alert)', type: 'textarea' }, { name: 'tellRecipient', label: 'Notify the person who was warned', type: 'checkbox', value: true }] }).then(function (v) {
+          if (!v) return;
+          act(api('/admin/scam-alerts/' + id, { method: 'PATCH', body: { status: 'confirmed', note: v.note, tellRecipient: !!v.tellRecipient } }), 'Marked as a scam').then(function () {
+            if (a && a.suspect && !a.suspect.is_suspended) form({ title: 'Suspend ' + plainName(a.suspect) + '?', body: 'Open their user page to suspend them (this also blocks sign-in).', confirm: 'Open user page' }).then(function (go) { if (go) location.hash = '#/users/' + a.suspect.id; });
+          });
+        });
+      });
+      bind('[data-sclear]', function (id) {
+        form({ title: 'Mark as a false alarm?', body: 'The warning disappears from the chat.', confirm: 'False alarm', fields: [{ name: 'note', label: 'Note (optional)', type: 'textarea' }] }).then(function (v) {
+          if (v) act(api('/admin/scam-alerts/' + id, { method: 'PATCH', body: { status: 'cleared', note: v.note } }), 'Marked as a false alarm');
+        });
+      });
+    }).catch(fail);
+  };
 
   // ═════════ Feedback ═════════
   PAGES.feedback = function (r) {
