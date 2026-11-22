@@ -98,6 +98,15 @@ export function htmlToText(html: string) {
     .replace(/\n{3,}/g, '\n\n').trim();
 }
 
+/**
+ * The RentCreeb logo for the email header: a PNG (email apps don't show SVG) served with the admin files,
+ * backend/admin/logo-email.png, made from assets/brand/rentcreeb-logo.svg at 3x. Falls back to a text wordmark
+ * when the server's public URL isn't known (local runs without API_PUBLIC_URL).
+ */
+const logo = () => env.API_PUBLIC_URL
+  ? `<img src="${env.API_PUBLIC_URL}/admin/logo-email.png" width="152" height="23" alt="RentCreeb" style="display:inline-block;border:0;outline:none;text-decoration:none;width:152px;height:23px;vertical-align:middle">`
+  : 'Rent<span style="color:#2563eb">Creeb</span>';
+
 /** Branded, email-client-safe wrapper with preheader and footer. */
 export function layout(inner: string, o: { preheader?: string | null; kind: Kind; prefsUrl?: string; unsubUrl?: string; viewUrl?: string }) {
   const foot = o.kind === 'marketing'
@@ -109,7 +118,7 @@ export function layout(inner: string, o: { preheader?: string | null; kind: Kind
 <body><span style="display:none!important;visibility:hidden;opacity:0;height:0;width:0;overflow:hidden;mso-hide:all">${esc(o.preheader ?? '')}&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;</span>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fb"><tr><td align="center" style="padding:28px 12px">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
-<tr><td style="padding:0 6px 16px;font:700 20px Arial,sans-serif;color:#0b1533">Rent<span style="color:#2563eb">Creeb</span>${o.viewUrl ? `<span style="float:right;font:400 12px Arial,sans-serif"><a href="${o.viewUrl}" style="color:#98a1b8">View in browser</a></span>` : ''}</td></tr>
+<tr><td style="padding:0 6px 16px;font:700 20px Arial,sans-serif;color:#0b1533">${logo()}${o.viewUrl ? `<span style="float:right;font:400 12px Arial,sans-serif"><a href="${o.viewUrl}" style="color:#98a1b8">View in browser</a></span>` : ''}</td></tr>
 <tr><td style="background:#fff;border-radius:14px;padding:30px 28px;font:15px/1.6 Arial,sans-serif;color:#111a33">${inner}</td></tr>
 <tr><td style="padding:18px 10px;font:12px/1.6 Arial,sans-serif;color:#98a1b8;text-align:center">${foot}<br>${esc(env.MAIL_COMPANY_ADDRESS)}</td></tr>
 </table></td></tr></table></body></html>`;

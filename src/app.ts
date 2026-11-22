@@ -53,6 +53,12 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
+  // Logo in the header of mailing emails (services/mailing.ts). Served before the admin's helmet so webmail on other
+  // origins may load it (helmet's default Cross-Origin-Resource-Policy is same-origin).
+  app.get('/admin/logo-email.png', (_req, res) => {
+    res.set({ 'Cross-Origin-Resource-Policy': 'cross-origin', 'Cache-Control': 'public, max-age=604800' });
+    res.sendFile(path.resolve(__dirname, '..', 'admin', 'logo-email.png'));
+  });
   // Admin dashboard (static files in backend/admin). It calls /api/v1/admin/* on this same origin, so no CORS.
   // Own CSP: scripts/styles only from here; images from https (listing photos, avatars, evidence on the CDN).
   app.use('/admin', helmet({
