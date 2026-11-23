@@ -7,6 +7,7 @@ import { logger } from '../lib/logger';
 import { forbidden, notFound } from '../lib/errors';
 import { fullName, paginate } from '../lib/common';
 import { authenticate } from '../middleware/auth';
+import { moneyLimit } from '../middleware/moneyLimit';
 import { confirmPayment } from '../services/paymentProcessor';
 
 export const webhookRouter = Router();
@@ -28,7 +29,7 @@ webhookRouter.post('/paystack', async (req, res) => {
   } catch (err) { logger.error({ err, event }, 'webhook processing failed'); }
 });
 
-r.use(authenticate);
+r.use(authenticate, moneyLimit);
 
 /** Client calls this after the Paystack sheet closes, as a fallback to the webhook. */
 r.get('/verify/:reference', async (req, res) => {

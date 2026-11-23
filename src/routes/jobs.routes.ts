@@ -191,13 +191,19 @@ r.post('/:id/revision/:decision', requireVerified, async (req, res) => {
   if (!e) throw conflict('No escrow found for this job');
   const diff = Number(job.revised_amount_kobo) - Number(e.amount_kobo);
   if (diff < 0) {
-    await reduceEscrow(e.id, Number(job.revised_amount_kobo));
-    await db.from('jobs').update({ revision_status: 'approved' }).eq('id', job.id);
+    // One decision only: two taps / two devices can't both trigger a refund.
+    const { data: claimed } = await db.from('jobs').update({ revision_status: 'approved' }).eq('id', job.id).eq('revision_status', 'pending').select('id').maybeSingle();
+    if (!claimed) throw conflict('This revision was already decided', 'BAD_STATE');
+    try { await reduceEscrow(e.id, Number(job.revised_amount_kobo)); }
+    catch (err) { await db.from('jobs').update({ revision_status: 'pending' }).eq('id', job.id).eq('revision_status', 'approved'); throw err; }
     await tellOther(job, req.user.id, 'Lower final price approved', `${job.title}: ₦${(-diff / 100).toLocaleString('en-NG')} refunded to the payer.`);
     return res.json({ revisionStatus: 'approved', refundedKobo: -diff });
   }
-  const payment = await createPayment(req.user, 'job_topup', diff, { job_id: job.id });
-  await db.from('jobs').update({ revision_status: 'awaiting_payment' }).eq('id', job.id);
+  const { data: claimed } = await db.from('jobs').update({ revision_status: 'awaiting_payment' }).eq('id', job.id).eq('revision_status', 'pending').select('id').maybeSingle();
+  if (!claimed) throw conflict('This revision was already decided', 'BAD_STATE');
+  let payment;
+  try { payment = await createPayment(req.user, 'job_topup', diff, { job_id: job.id }); }
+  catch (err) { await db.from('jobs').update({ revision_status: 'pending' }).eq('id', job.id).eq('revision_status', 'awaiting_payment'); throw err; }
   res.status(201).json({ revisionStatus: 'awaiting_payment', payment });
 });
 

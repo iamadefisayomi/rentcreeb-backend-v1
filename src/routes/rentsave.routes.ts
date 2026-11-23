@@ -4,11 +4,12 @@ import { db, unwrap } from '../lib/supabase';
 import { badRequest, notFound } from '../lib/errors';
 import { kobo, uuid } from '../lib/common';
 import { authenticate, requireRole, requireVerified } from '../middleware/auth';
+import { moneyLimit } from '../middleware/moneyLimit';
 import { createPayment } from '../services/payments';
 import { settleRent } from '../services/rent';
 
 const r = Router();
-r.use(authenticate, requireRole('tenant'));
+r.use(authenticate, requireRole('tenant'), moneyLimit);
 
 const withProgress = (p: any) => ({ ...p, progressPercent: Math.min(100, Math.round((Number(p.saved_kobo) / Number(p.target_kobo)) * 100)) });
 

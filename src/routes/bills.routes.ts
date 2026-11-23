@@ -4,6 +4,7 @@ import { db, dbError, unwrap } from '../lib/supabase';
 import { badRequest, forbidden, notFound } from '../lib/errors';
 import { uuid } from '../lib/common';
 import { authenticate, requireRole, requireVerified } from '../middleware/auth';
+import { moneyLimit } from '../middleware/moneyLimit';
 import { createPayment } from '../services/payments';
 import { notify } from '../services/notify';
 import { logger } from '../lib/logger';
@@ -14,7 +15,7 @@ import { logger } from '../lib/logger';
  * landlord's wallet) or the landlord records a cash/transfer payment or waives it.
  */
 const r = Router();
-r.use(authenticate);
+r.use(authenticate, moneyLimit);
 const MANAGERS = ['landlord', 'estate_manager'] as const;
 export const BILL_CATEGORIES = ['service_charge', 'electricity', 'diesel', 'water', 'security', 'waste', 'maintenance', 'other'] as const;
 const naira = (k: number | string) => `₦${(Number(k) / 100).toLocaleString('en-NG', { maximumFractionDigits: 2 })}`;

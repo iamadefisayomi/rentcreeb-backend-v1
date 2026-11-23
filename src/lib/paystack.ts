@@ -23,7 +23,7 @@ export const paystack = {
               callback_url: p.callbackUrl ?? env.PAYSTACK_CALLBACK_URL, metadata: p.metadata },
     }),
   verify: (reference: string) =>
-    ps<{ status: string; amount: number; reference: string; channel: string }>(`/transaction/verify/${encodeURIComponent(reference)}`),
+    ps<{ status: string; amount: number; reference: string; channel: string; currency: string }>(`/transaction/verify/${encodeURIComponent(reference)}`),
   refund: (reference: string, amountKobo: number) =>
     ps('/refund', { method: 'POST', body: { transaction: reference, amount: amountKobo } }),
   balance: () => ps<{ currency: string; balance: number }[]>('/balance'),

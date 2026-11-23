@@ -4,6 +4,8 @@ import { db, dbError, unwrap } from '../lib/supabase';
 import { badRequest, forbidden, HttpError, notFound } from '../lib/errors';
 import { uuid } from '../lib/common';
 import { authenticate } from '../middleware/auth';
+import { moneyLimit } from '../middleware/moneyLimit';
+import { env } from '../config/env';
 import { createPayment } from '../services/payments';
 import { requestId, vtpassReady } from '../lib/vtpass';
 import { catalog, feeFor, normalizePhone, plans, provider, requeryOrder, startDelivery, verifyCustomer } from '../services/utilities';
@@ -13,7 +15,7 @@ import { catalog, feeFor, normalizePhone, plans, provider, requeryOrder, startDe
  * Rules and the money flow are in services/utilities.ts.
  */
 const r = Router();
-r.use(authenticate);
+r.use(authenticate, moneyLimit);
 
 const ORDER_COLS = 'id, category, service_id, provider_name, customer_id, customer_name, meter_type, variation_code, variation_name, phone, amount_kobo, fee_kobo, total_kobo, pay_method, status, token, units, error, provider_ref, payment_id, created_at, delivered_at';
 const ready = () => { if (!vtpassReady()) throw new HttpError(503, 'Bill payments are coming soon', 'UTILITIES_UNAVAILABLE'); };
@@ -89,6 +91,14 @@ r.post('/orders', async (req, res) => {
   }
 
   const fee = feeFor(p.category);
+  // Unverified accounts can buy small amounts only (stolen cards are typically burnt on airtime / tokens).
+  if (req.user.verification_status !== 'verified') {
+    const { data: today } = await db.from('utility_orders').select('total_kobo').eq('user_id', req.user.id).in('status', ['awaiting_payment', 'processing', 'delivered'])
+      .gte('created_at', new Date(Date.now() - 864e5).toISOString());
+    const spent = (today ?? []).reduce((s, o: any) => s + Number(o.total_kobo), 0);
+    if (spent + amountKobo + fee > env.UTILITY_UNVERIFIED_DAILY_KOBO)
+      throw forbidden(`Verify your identity to spend more than ₦${(env.UTILITY_UNVERIFIED_DAILY_KOBO / 100).toLocaleString('en-NG')} a day on bills`, 'VERIFICATION_REQUIRED');
+  }
   const order = unwrap(await db.from('utility_orders').insert({
     user_id: req.user.id, category: p.category, service_id: p.serviceId, provider_name: p.name, customer_id: customerId, customer_name: customerName,
     meter_type: p.category === 'electricity' ? b.meterType : null, variation_code: plan?.code ?? null, variation_name: plan?.name ?? null, phone,

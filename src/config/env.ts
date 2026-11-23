@@ -52,6 +52,8 @@ const schema = z.object({
   VTPASS_PUBLIC_KEY: z.string().optional(),
   /** Convenience fee added to each electricity / TV / internet / exam purchase (not airtime or data). */
   UTILITY_FEE_KOBO: z.coerce.number().int().min(0).default(0),
+  /** Bill purchases per 24 h for accounts without NIN verification (default ₦20,000). */
+  UTILITY_UNVERIFIED_DAILY_KOBO: z.coerce.number().int().min(0).default(2_000_000),
   /** Wallet top-ups (any role): per top-up min / max and a rolling 24-hour total per user. Defaults ₦100 / ₦500,000 / ₦1,000,000. */
   WALLET_FUND_MIN_KOBO: z.coerce.number().int().min(100).default(10_000),
   WALLET_FUND_MAX_KOBO: z.coerce.number().int().min(100).default(50_000_000),

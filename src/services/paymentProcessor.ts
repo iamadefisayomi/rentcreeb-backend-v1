@@ -28,8 +28,9 @@ export async function confirmPayment(reference: string) {
       await db.from('payments').update({ status: 'failed' }).eq('id', existing.id).eq('status', 'pending');
     return { status: tx.status, payment: existing };
   }
-  if (tx.amount !== Number(existing.amount_kobo)) {
-    logger.error({ reference, paid: tx.amount, expected: existing.amount_kobo }, 'AMOUNT MISMATCH');
+  // Never trust the amount, currency or reference blindly: the payment row is the source of truth.
+  if (tx.amount !== Number(existing.amount_kobo) || (tx.currency && tx.currency !== 'NGN') || (tx.reference && tx.reference !== reference)) {
+    logger.error({ reference, paid: tx.amount, currency: tx.currency, txRef: tx.reference, expected: existing.amount_kobo }, 'PAYMENT MISMATCH');
     await db.from('payments').update({ status: 'failed' }).eq('id', existing.id).eq('status', 'pending');
     return { status: 'failed', payment: existing };
   }
@@ -118,10 +119,16 @@ async function onJobEscrow(p: any) {
 
 /** The payer paid the extra amount for an approved higher final price: grow the escrow. */
 async function onJobTopup(p: any) {
-  const { data: e } = await db.from('escrows').select('*').eq('job_id', p.job_id).eq('kind', 'job').eq('status', 'held').single();
-  if (!e) return;
-  const newAmount = Number(e.amount_kobo) + Number(p.amount_kobo);
-  await db.from('escrows').update({ amount_kobo: newAmount, fee_kobo: pct(newAmount, env.JOB_PLATFORM_FEE_PCT) }).eq('id', e.id);
+  // Compare-and-set so two top-ups confirmed at the same moment can't overwrite each other.
+  let e: any = null;
+  for (let i = 0; i < 5; i++) {
+    const { data: cur } = await db.from('escrows').select('*').eq('job_id', p.job_id).eq('kind', 'job').eq('status', 'held').maybeSingle();
+    if (!cur) { logger.error({ payment: p.id }, 'TOP-UP PAID BUT NO HELD ESCROW - needs manual refund'); return; }
+    const newAmount = Number(cur.amount_kobo) + Number(p.amount_kobo);
+    const { data: ok } = await db.from('escrows').update({ amount_kobo: newAmount, fee_kobo: pct(newAmount, env.JOB_PLATFORM_FEE_PCT) }).eq('id', cur.id).eq('amount_kobo', cur.amount_kobo).select('id').maybeSingle();
+    if (ok) { e = cur; break; }
+  }
+  if (!e) { logger.error({ payment: p.id }, 'TOP-UP ESCROW UPDATE KEPT CONFLICTING'); return; }
   await db.from('jobs').update({ revision_status: 'approved' }).eq('id', p.job_id);
   await notify(e.payee_id, 'revision_approved', 'Revised amount approved', 'Your updated final cost was approved and paid into escrow.', { jobId: p.job_id });
   const { data: job } = await db.from('jobs').select('id, title, landlord_id, tenant_id').eq('id', p.job_id).maybeSingle();
