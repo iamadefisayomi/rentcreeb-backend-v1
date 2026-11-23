@@ -1,6 +1,6 @@
 interface Profile {
   id: string;
-  role: 'tenant' | 'landlord' | 'estate_manager' | 'artisan' | 'agent' | 'developer' | 'investor' | 'admin';
+  role: 'tenant' | 'landlord' | 'estate_manager' | 'artisan' | 'agent' | 'developer' | 'investor' | 'admin_manager' | 'admin';
   first_name: string | null;
   last_name: string | null;
   email: string | null;

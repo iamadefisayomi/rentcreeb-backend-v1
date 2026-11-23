@@ -102,7 +102,7 @@ export function mountAssistant(r: Router) {
   // ── support agents: who can take a live handover right now ──
   r.get('/support/agents', async (_req, res) => {
     const [{ data: admins }, { data: agents }] = await Promise.all([
-      db.from('profiles').select('id, first_name, last_name, email, avatar_url').eq('role', 'admin').is('deleted_at', null),
+      db.from('profiles').select('id, first_name, last_name, email, avatar_url').in('role', ['admin', 'admin_manager']).is('deleted_at', null),
       db.from('support_agents').select('*'),
     ]);
     const since = Date.now() - 3 * 60_000;

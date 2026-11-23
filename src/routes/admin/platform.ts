@@ -16,7 +16,7 @@ import { getSettings, setSetting } from '../../services/settings';
 import { iceServers } from '../calls.routes';
 import { PERSON, audit, count, dailySeries, isUuid, like, sumKobo } from './shared';
 
-const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin'] as const;
+const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin_manager', 'admin'] as const;
 const audience = z.object({
   roles: z.array(z.enum(ROLES)).default([]),
   verification: z.enum(['any', 'verified', 'unverified']).default('any'),
@@ -42,7 +42,7 @@ const timed = async <T>(fn: () => Promise<T>, ms = 12_000): Promise<T | { ok: fa
 
 export function mountPlatform(r: Router) {
   // ───────── Overview ─────────
-  r.get('/overview', async (_req, res) => {
+  r.get('/overview', async (req, res) => {
     const d30 = new Date(Date.now() - 30 * 864e5).toISOString();
     const d7 = new Date(Date.now() - 7 * 864e5).toISOString();
     const h1 = new Date(Date.now() - 3600e3).toISOString();
@@ -69,7 +69,17 @@ export function mountPlatform(r: Router) {
       count('scam_alerts', (q) => q.in('status', ['open', 'reported'])),
     ]);
     const settings = await getSettings();
+    if (req.user.role !== 'admin') return res.json({ // managers: no money figures or audit trail
+      role: req.user.role,
+      users: { total: users, new7d: newUsers7d, tenants, landlords, agents, artisans, suspended, verified },
+      queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, scamAlerts },
+      activity: { liveProperties, bookings7d },
+      trends: { signups: dailySeries(signups30.data ?? [], 30) },
+      settings: { maintenanceMode: settings.maintenanceMode, banner: settings.banner },
+      recentActions: [],
+    });
     res.json({
+      role: req.user.role,
       users: { total: users, new7d: newUsers7d, tenants, landlords, agents, artisans, suspended, verified },
       queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, pendingWithdrawals, stuckPayments, scamAlerts },
       activity: { liveProperties, bookings7d, activeSubscriptions: activeSubs, paymentsKobo30d: sumKobo(pay30.data), escrowHeldKobo: sumKobo(escrowHeld.data), heldEscrows },
@@ -201,7 +211,7 @@ export function mountPlatform(r: Router) {
     res.json({ actions: data, total: total ?? 0 });
   });
   r.get('/admins', async (_req, res) => {
-    const { data, error } = await db.from('profiles').select(PERSON + ', created_at').eq('role', 'admin').order('created_at');
+    const { data, error } = await db.from('profiles').select(PERSON + ', created_at').in('role', ['admin', 'admin_manager']).order('created_at');
     if (error) throw dbError(error);
     res.json({ admins: data });
   });

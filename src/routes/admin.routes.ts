@@ -8,10 +8,12 @@ import { mountMailing } from './admin/mailing';
 import { mountAssistant } from './admin/assistant';
 import { mountWaitlist } from './admin/waitlist';
 import { mountScam } from './admin/scam';
+import { ADMIN_ROLES, limitManagers } from './admin/access';
 
 /**
  * Admin API, used by the web dashboard served at /admin (backend/admin).
- * Every route needs a signed-in profile with role 'admin'. Every change is written to admin_actions.
+ * Every route needs a signed-in profile with role 'admin' or 'admin_manager' (a manager reaches only the routes
+ * allow-listed in admin/access.ts). Every change is written to admin_actions.
  *
  *   platform: overview, search, system health, runtime settings, announcements, audit log
  *   people:   users, ID verification review, artisan applications, internal notes
@@ -22,7 +24,7 @@ import { mountScam } from './admin/scam';
  *   money:    finance, payments, bookings, escrow, withdrawals, subscriptions & plans, tenancies, RentSave, jobs
  */
 const r = Router();
-r.use(authenticate, requireRole('admin'));
+r.use(authenticate, requireRole(...ADMIN_ROLES), limitManagers);
 r.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
 mountPlatform(r);

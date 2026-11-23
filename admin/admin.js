@@ -199,6 +199,12 @@
     ['Mailing', [['mailing', 'Overview'], ['mail-campaigns', 'Campaigns'], ['mail-automations', 'Automations'], ['mail-contacts', 'Contacts'], ['mail-lists', 'Lists & sign-up form'], ['mail-templates', 'Templates']]],
     ['Platform', [['assistant', 'AI Assistant'], ['announcements', 'Announcements'], ['audit', 'Audit log']]],
   ];
+  // Admin managers (role admin_manager) see only these sections; the API enforces the same limits (src/routes/admin/access.ts).
+  var MANAGER_SECTIONS = ['overview', 'verifications', 'listings', 'artisans', 'reports', 'scam', 'reviews', 'support', 'feedback', 'users', 'waitlist', 'bookings', 'tenancies', 'jobs', 'rentsave'];
+  function isAdminRole(role) { return role === 'admin' || role === 'admin_manager'; }
+  function isManager() { return !!me && me.role === 'admin_manager'; }
+  function canSee(section) { return !isManager() || MANAGER_SECTIONS.indexOf(section) >= 0; }
+  function visibleNav() { return NAV.map(function (g) { return [g[0], g[1].filter(function (n) { return canSee(n[0]); })]; }).filter(function (g) { return g[1].length; }); }
   var ALL_NAV = []; NAV.forEach(function (g) { ALL_NAV = ALL_NAV.concat(g[1]); });
   // Line icons (24×24, stroke) for the sidebar and controls.
   var ICON_PATHS = {
@@ -263,7 +269,7 @@
 
   function shell(section, title, sub, actions) {
     var group = '';
-    var nav = NAV.map(function (g) {
+    var nav = visibleNav().map(function (g) {
       return '<div class="nav-group">' + esc(g[0]) + '</div>' + g[1].map(function (n) {
         if (section === n[0]) group = g[0];
         var c = n[2] && counts[n[2]] ? '<span class="badge">' + counts[n[2]] + '</span>' : '';
@@ -356,6 +362,7 @@
 
   /** Read a conversation (asks why first; every view is in the audit log). */
   function openConversation(id) {
+    if (isManager()) { toast('Only a full admin can read private conversations.'); return; }
     reason('Open this conversation?', 'Why are you reading it? (saved in the audit log)', { body: 'Private messages are only opened to investigate a report, dispute or safety issue.', placeholder: 'e.g. Investigating report about a fake listing', confirm: 'Open' }).then(function (v) {
       if (!v) return;
       api('/admin/conversations/' + id + '/messages' + qs({ reason: v.reason })).then(function (j) {
@@ -427,10 +434,11 @@
     if (!session) return renderLogin();
     if (!me) return api('/users/me').then(function (r) {
       var p = r.profile || r.user || r;
-      if (!p || p.role !== 'admin') { logout('This account is not an admin.'); return; }
+      if (!p || !isAdminRole(p.role)) { logout('This account is not an admin.'); return; }
       me = p; refreshCounts().catch(function () {}).then(route);
     }).catch(function () { logout(); });
     var r = parse(); var s = r.path[0] || 'overview';
+    if (!canSee(s)) { shell('overview', 'Not available', ''); view('<div class="alert info">Your manager account can\'t open this section. Ask a full admin if you need something here.</div>'); return; }
     (PAGES[s] || PAGES.overview)(r);
     window.scrollTo(0, 0);
   }
@@ -453,7 +461,7 @@
       e.preventDefault();
       var f = e.target; var btn = f.querySelector('button'); btn.disabled = true; btn.textContent = 'Signing in…';
       api('/auth/login', { method: 'POST', body: { identifier: f.email.value.trim(), password: f.password.value } }).then(function (r) {
-        if (!r.profile || r.profile.role !== 'admin') { renderLogin('This account is not an admin.'); return; }
+        if (!r.profile || !isAdminRole(r.profile.role)) { renderLogin('This account is not an admin.'); return; }
         save(r.session); me = r.profile;
         refreshCounts().catch(function () {}).then(function () { if (!location.hash || location.hash === '#/') location.hash = '#/overview'; else route(); });
       }).catch(function (err) { renderLogin(err.status === 401 ? 'Wrong email or password.' : err.message); });
@@ -474,15 +482,17 @@
         card(q.manualVerifications, 'ID checks needing review', '#/verifications', 1) + card(q.pendingProperties, 'Listings awaiting approval', '#/listings', 1) +
         card(q.pendingArtisans, 'Artisan applications', '#/artisans', 1) + card(q.openReports, 'Open reports', '#/reports', 1) + card(q.scamAlerts || 0, 'Scam alerts to review', '#/scam', 1) +
         card(q.flaggedReviews, 'Flagged reviews', '#/reviews', 1) + card(q.openTickets, 'Open support tickets', '#/support', 1) +
-        card(q.pendingWithdrawals, 'Withdrawals pending over 1h', '#/withdrawals?tab=pending', 1) + card(q.stuckPayments, 'Payments stuck at pending', '#/payments?status=pending', 1) + '</div>' +
+        (isManager() ? '' : card(q.pendingWithdrawals, 'Withdrawals pending over 1h', '#/withdrawals?tab=pending', 1) + card(q.stuckPayments, 'Payments stuck at pending', '#/payments?status=pending', 1)) + '</div>' +
         '<h2 class="section-title">Platform</h2><div class="grid cols-4">' +
         card(u.total, 'Users (' + u.new7d + ' new this week)', '#/users') + card(u.verified, 'NIN-verified users', '#/users?status=verified') +
         plain(u.tenants, 'Tenants') + plain(u.landlords, 'Landlords & estate managers') + plain(u.agents, 'Agents') + plain(u.artisans, 'Artisans') +
         card(u.suspended, 'Suspended accounts', '#/users?status=suspended') + card(a.liveProperties, 'Live listings', '#/listings?tab=approved') +
-        card(a.bookings7d, 'Bookings this week', '#/bookings') + card(a.activeSubscriptions, 'Active subscriptions', '#/subscriptions') +
+        card(a.bookings7d, 'Bookings this week', '#/bookings') +
+        (isManager() ? '</div><div class="grid cols-2" style="margin-top:14px">' + section('Sign-ups, last 30 days', chart(o.trends.signups)) + '</div>' :
+        card(a.activeSubscriptions, 'Active subscriptions', '#/subscriptions') +
         card(naira(a.paymentsKobo30d), 'Payments, last 30 days', '#/finance') + card(naira(a.escrowHeldKobo), 'Held in escrow (' + a.heldEscrows + ')', '#/escrow') + '</div>' +
         '<div class="grid cols-2" style="margin-top:14px">' + section('Sign-ups, last 30 days', chart(o.trends.signups)) + section('Payments, last 30 days', chart(o.trends.paymentsKobo, naira)) + '</div>' +
-        '<h2 class="section-title">Recent admin activity <a class="btn sm" href="#/audit">Full audit log →</a></h2><div class="card">' + actionsTable(o.recentActions) + '</div>');
+        '<h2 class="section-title">Recent admin activity <a class="btn sm" href="#/audit">Full audit log →</a></h2><div class="card">' + actionsTable(o.recentActions) + '</div>'));
     }).catch(fail);
   };
 
@@ -1127,12 +1137,12 @@
   }
 
   // ═════════ Users ═════════
-  var ROLES = [['tenant', 'Tenant'], ['landlord', 'Landlord'], ['estate_manager', 'Estate manager'], ['agent', 'Agent'], ['artisan', 'Artisan'], ['admin', 'Admin']];
+  var ROLES = [['tenant', 'Tenant'], ['landlord', 'Landlord'], ['estate_manager', 'Estate manager'], ['agent', 'Agent'], ['artisan', 'Artisan'], ['developer', 'Developer'], ['investor', 'Investor'], ['admin_manager', 'Admin manager'], ['admin', 'Admin']];
   PAGES.users = function (r) {
     if (r.path[1]) return userDetail(r.path[1]);
     var page = Number(r.q.page || 1);
     var f = { q: r.q.q, role: r.q.role, status: r.q.status, sort: r.q.sort };
-    shell('users', 'Users', 'Search accounts, check activity, verify, message or suspend.', '<button class="btn sm" id="u-export">Export CSV</button>');
+    shell('users', 'Users', 'Search accounts, check activity, verify, message or suspend.', isManager() ? '' : '<button class="btn sm" id="u-export">Export CSV</button>');
     var filters = '<form class="row" id="ufilter" style="margin-bottom:14px"><input class="input" name="q" placeholder="Name, email, phone or ID" value="' + esc(r.q.q || '') + '">' +
       '<select class="input" name="role"><option value="">All roles</option>' + ROLES.map(function (x) { return '<option' + (r.q.role === x[0] ? ' selected' : '') + ' value="' + x[0] + '">' + x[1] + '</option>'; }).join('') + '</select>' +
       '<select class="input" name="status"><option value="">Any status</option>' + [['verified', 'NIN verified'], ['phone_only', 'Phone verified only'], ['unverified', 'Not NIN verified'], ['active', 'Not suspended'], ['suspended', 'Suspended'], ['deleted', 'Deleted']].map(function (x) { return '<option' + (r.q.status === x[0] ? ' selected' : '') + ' value="' + x[0] + '">' + x[1] + '</option>'; }).join('') + '</select>' +
@@ -1152,14 +1162,15 @@
   function userDetail(id) {
     shell('users', 'User', '', '<a class="btn sm" href="#/users">← All users</a>');
     api('/admin/users/' + encodeURIComponent(id)).then(function (j) {
-      var u = j.user, a = j.artisan, au = j.auth || {}, self = u.id === me.id, closed = !!u.deleted_at;
+      var u = j.user, a = j.artisan, au = j.auth || {}, self = u.id === me.id, closed = !!u.deleted_at, full = !isManager(), staff = isAdminRole(u.role);
       shell('users', plainName(u) || 'User', label(u.role).replace(/&amp;/g, '&') + ' · joined ' + when(u.created_at), '<a class="btn sm" href="#/users">← All users</a>');
-      var menuItems = closed ? '' : [
-        '<button data-ua="edit">Edit profile</button>', self ? '' : '<button data-ua="role">Change role</button>', '<button data-ua="message">Send a message</button>', u.email ? '<button data-ua="reset">Send password reset email</button>' : '',
+      var delItem = full && !self && u.role !== 'admin' ? '<button data-ua="delete" class="danger-text">Delete permanently</button>' : '';
+      var menuItems = closed ? delItem : [
+        full || !staff || self ? '<button data-ua="edit">Edit profile</button>' : '', self || !full ? '' : '<button data-ua="role">Change role</button>', '<button data-ua="message">Send a message</button>', u.email ? '<button data-ua="reset">Send password reset email</button>' : '',
         '<hr>', u.nin_verified ? '<button data-ua="revoke" class="danger-text">Revoke NIN verification</button>' : '<button data-ua="verify">Mark NIN verified</button>', !u.nin_verified ? '<button data-ua="attempts">Reset verification attempts</button>' : '',
         u.phone ? (u.phone_verified ? '<button data-ua="phoneoff">Mark phone unverified</button>' : '<button data-ua="phoneon">Mark phone verified</button>') : '',
-        '<hr>', '<button data-ua="credit">Credit wallet</button>', '<button data-ua="debit">Debit wallet</button>', ['agent', 'landlord', 'estate_manager'].indexOf(u.role) >= 0 ? '<button data-ua="grant">Give a subscription plan</button>' : '',
-        '<hr>', self ? '' : u.is_suspended ? '<button data-ua="unsuspend">Lift suspension</button>' : '<button data-ua="suspend" class="danger-text">Suspend account</button>', self ? '' : '<button data-ua="close" class="danger-text">Close account (anonymise)</button>',
+        full ? '<hr>' : '', full ? '<button data-ua="credit">Credit wallet</button>' : '', full ? '<button data-ua="debit">Debit wallet</button>' : '', full && ['agent', 'landlord', 'estate_manager'].indexOf(u.role) >= 0 ? '<button data-ua="grant">Give a subscription plan</button>' : '',
+        '<hr>', self || (!full && staff) ? '' : u.is_suspended ? '<button data-ua="unsuspend">Lift suspension</button>' : '<button data-ua="suspend" class="danger-text">Suspend account</button>', self || !full ? '' : '<button data-ua="close" class="danger-text">Close account (anonymise)</button>', delItem,
       ].join('');
       var banner = closed ? '<div class="alert grey" style="background:var(--bg)">This account was closed on ' + when(u.deleted_at) + '.</div>' : u.is_suspended ? '<div class="alert bad">Suspended' + (u.suspended_at ? ' ' + when(u.suspended_at) : '') + (u.suspended_reason ? ': ' + esc(u.suspended_reason) : '') + '</div>' : '';
       var w = j.wallet;
@@ -1203,7 +1214,7 @@
         edit: function () { form({ title: 'Edit profile', fields: [{ name: 'firstName', label: 'First name', value: u.first_name, required: true }, { name: 'lastName', label: 'Last name', value: u.last_name, required: true },
           { name: 'phone', label: 'Phone', value: u.phone, hint: 'Changing it marks the phone as unverified.' }, { name: 'reason', label: 'Reason (audit log)', type: 'textarea' }], confirm: 'Save' })
           .then(function (v) { if (v) act(api('/admin/users/' + u.id, { method: 'PATCH', body: { firstName: v.firstName, lastName: v.lastName, phone: v.phone || null, reason: v.reason } }), 'Profile updated'); }); },
-        role: function () { form({ title: 'Change role', body: 'Making someone an admin gives them full access to this dashboard.', fields: [{ name: 'role', label: 'Role', type: 'select', value: u.role, options: ROLES }, { name: 'reason', label: 'Reason (audit log)', type: 'textarea', required: true, min: 3 }], confirm: 'Change role', danger: true })
+        role: function () { form({ title: 'Change role', body: 'Admin gives full access to this dashboard. Admin manager gives moderation and support only (no money, mailing, settings or role changes).', fields: [{ name: 'role', label: 'Role', type: 'select', value: u.role, options: ROLES }, { name: 'reason', label: 'Reason (audit log)', type: 'textarea', required: true, min: 3 }], confirm: 'Change role', danger: true })
           .then(function (v) { if (v && v.role !== u.role) act(api('/admin/users/' + u.id, { method: 'PATCH', body: { role: v.role, reason: v.reason } }), 'Role changed'); }); },
         message: function () { form({ title: 'Message ' + plainName(u), body: 'Arrives as an in-app notification and push.', fields: [{ name: 'title', label: 'Title', required: true }, { name: 'body', label: 'Message', type: 'textarea', required: true }, { name: 'email', label: 'Also send by email', type: 'checkbox', value: !!u.email }], confirm: 'Send' })
           .then(function (v) { if (v) act(post('/admin/users/' + u.id + '/notify', { title: v.title, body: v.body, email: !!v.email }), 'Message sent'); }); },
@@ -1225,6 +1236,17 @@
         },
         suspend: function () { suspendFlow(u.id); },
         unsuspend: function () { act(post('/admin/users/' + u.id + '/suspend', { suspended: false }), 'Suspension lifted'); },
+        delete: function () {
+          form({ title: 'Delete this account permanently?', danger: true, confirm: 'Delete permanently',
+            body: 'This removes ' + plainName(u) + '\u2019s sign-in, profile, listings, chats, bookings, tenancies, jobs, reviews, documents and photos, including records shared with the other people involved. Payments and escrow records are kept without their name. This cannot be undone. It is refused while they have money in their wallet, RentSave or escrow, a pending withdrawal, an active tenancy or a paid booking.',
+            fields: [{ name: 'reason', label: 'Reason (audit log)', type: 'textarea', required: true, min: 3, placeholder: 'e.g. Data deletion request, ticket #…' }, { name: 'confirm', label: 'Type DELETE to confirm', required: true }] })
+            .then(function (v) {
+              if (!v) return; if (v.confirm !== 'DELETE') { toast('Type DELETE to confirm', true); return; }
+              post('/admin/users/' + u.id + '/delete', { confirm: 'DELETE', reason: v.reason })
+                .then(function () { toast('Account deleted permanently'); location.hash = '#/users'; })
+                .catch(function (e) { toast(e.message, true); });
+            });
+        },
         close: function () {
           form({ title: 'Close this account?', body: 'Their name, email, phone and photo are removed, listings are archived and sign-in is blocked. Payments and bookings stay for other users. This cannot be undone.',
             fields: [{ name: 'reason', label: 'Reason (audit log)', type: 'textarea', required: true, min: 3, placeholder: 'e.g. Data deletion request, ticket #…' },
@@ -1308,7 +1330,7 @@
     api('/admin/bookings/' + encodeURIComponent(id)).then(function (j) {
       var b = j.booking; var held = j.escrows.filter(function (e) { return e.status === 'held'; })[0];
       shell('bookings', 'Booking: ' + (b.properties && b.properties.title || ''), 'Inspection ' + when(b.scheduled_at), '<a class="btn sm" href="#/bookings">← Bookings</a>');
-      var canCancel = ['pending_payment', 'paid', 'confirmed'].indexOf(b.status) >= 0, canComplete = ['paid', 'confirmed'].indexOf(b.status) >= 0;
+      var canCancel = !isManager() && ['pending_payment', 'paid', 'confirmed'].indexOf(b.status) >= 0, canComplete = !isManager() && ['paid', 'confirmed'].indexOf(b.status) >= 0;
       view('<div class="stack"><div class="card row between"><div class="row">' + statusBadge(b.status) + (held ? badge(naira(held.amount_kobo) + ' held in escrow', 'warn') : '') + '</div><div class="row">' +
         (j.conversationId ? '<button class="btn" data-conv="' + esc(j.conversationId) + '">Read their chat</button>' : '') +
         (canComplete ? '<button class="btn ok" id="b-complete">Mark done & pay host</button>' : '') + (canCancel ? '<button class="btn ghost-danger" id="b-cancel">Cancel' + (b.status !== 'pending_payment' ? ' & refund' : '') + '</button>' : '') + '</div></div>' +

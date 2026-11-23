@@ -107,7 +107,7 @@ export async function screenMessage(conv: { id: string; participant_a: string; p
     if (rules.score < 2 && !rules.strong) return;
 
     const { data: roles } = await db.from('profiles').select('id, role').in('id', [msg.sender_id, recipient]);
-    if ((roles ?? []).some((p: any) => p.id === msg.sender_id && p.role === 'admin')) return;
+    if ((roles ?? []).some((p: any) => p.id === msg.sender_id && (p.role === 'admin' || p.role === 'admin_manager'))) return;
 
     const transcript = rows.filter((m) => !m.system && m.body).map((m) => `${m.sender_id === msg.sender_id ? 'SENDER' : 'RECIPIENT'}: ${String(m.body).slice(0, 600)}`).join('\n');
     const ai = await aiVerdict(transcript, CONTEXT_LABEL[conv.context_type] ?? conv.context_type);

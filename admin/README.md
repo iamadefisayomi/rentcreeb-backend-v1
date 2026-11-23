@@ -17,6 +17,27 @@ update profiles set role = 'admin' where email = 'person@example.com';
 
 Anyone without the admin role is refused, both in the page and by the API. You can't change your own role or suspend yourself.
 
+### Deleting an account permanently
+
+Users → person → Actions → **Delete permanently** (full admins only; needs migration `031_admin_delete_user.sql`). You type `DELETE` and a reason.
+It removes the sign-in, profile, listings, chats, bookings, tenancies, maintenance requests, jobs, reviews, documents and uploaded photos,
+including records shared with the other people involved. Payments and escrow rows are kept with the user unlinked, so finance totals don't change.
+It runs as one database transaction and is refused while money is in motion: a wallet or RentSave balance, held escrow, a pending withdrawal,
+an active tenancy, or a paid or confirmed booking. Full admins can't be deleted until their role is changed. The audit log keeps the name, email, phone and reason.
+"Close account (anonymise)" is still there for when you want to keep the history.
+
+### Admin managers (limited access)
+
+Role `admin_manager` (needs migration `030_admin_manager_role.sql`) is for staff who run the day-to-day work but shouldn't hold every key.
+Create one with `node scripts/create-admin-manager.mjs --email person@example.com --first Ada --last Obi`, or from Users → Change role → Admin manager.
+
+- **Can:** overview (without money figures), search, ID verification, listings, artisans, reports, scam alerts, reviews, support chat, app feedback,
+  users (view, edit profile, verify, suspend non-staff, message, password reset email), internal notes, waitlist (view), bookings / tenancies / jobs / RentSave (view only).
+- **Can't:** finance, payments, escrow, withdrawals, subscriptions & plans, wallet credit/debit, cancelling or completing bookings, closing accounts, CSV exports,
+  changing roles, editing or suspending other admins, reading private conversations, mailing, AI assistant setup, system & settings, announcements, audit log.
+
+The API enforces this with an allow-list in `src/routes/admin/access.ts` (new admin routes stay admin-only until added there); the page hides what a manager can't use.
+
 ## What it does
 
 | Section | What admins can do |

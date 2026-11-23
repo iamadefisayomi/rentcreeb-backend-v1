@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { env } from '../../config/env';
 import { anonClient, db, dbError, unwrapMaybe } from '../../lib/supabase';
 import { badRequest, conflict, notFound } from '../../lib/errors';
-import { signPrivateUrl } from '../../lib/bunny';
+import { deleteFromBunny, signPrivateUrl } from '../../lib/bunny';
 import { normalizePhone, paginate, uuid } from '../../lib/common';
 import { sendEmail } from '../../lib/email';
 import { logger } from '../../lib/logger';
@@ -12,8 +12,9 @@ import { closeAccount } from '../../services/accounts';
 import { presenceOf } from '../../services/presence';
 import { purgeVerificationEvidence } from '../../services/verificationEvidence';
 import { PERSON, audit, count, decision, like, notesFor, sendCsv } from './shared';
+import { assertFullAdmin } from './access';
 
-const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin'] as const;
+const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin_manager', 'admin'] as const;
 const USER_COLS = 'id, first_name, last_name, email, phone, role, avatar_url, phone_verified, nin_verified, is_suspended, deleted_at, rating_avg, rating_count, created_at';
 const escHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
@@ -170,6 +171,8 @@ export function mountPeople(r: Router) {
     if (!before) throw notFound('User not found');
     if (before.deleted_at) throw badRequest('This account was deleted');
     if (b.role && id === req.user.id) throw badRequest('You cannot change your own role');
+    if (b.role && b.role !== before.role) assertFullAdmin(req, 'change roles');
+    if (req.user.role !== 'admin' && (before.role === 'admin' || before.role === 'admin_manager') && id !== req.user.id) assertFullAdmin(req, 'edit another admin');
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (b.firstName !== undefined) patch.first_name = b.firstName;
     if (b.lastName !== undefined) patch.last_name = b.lastName;
@@ -184,7 +187,7 @@ export function mountPeople(r: Router) {
     const { error } = await db.from('profiles').update(patch).eq('id', id);
     if (error) throw dbError(error);
     const changed = Object.fromEntries(Object.entries(patch).filter(([k, v]) => k !== 'updated_at' && (before as any)[k] !== v).map(([k, v]) => [k, { from: (before as any)[k], to: v }]));
-    await audit(req, b.role && b.role !== before.role ? (b.role === 'admin' ? 'user.grant_admin' : before.role === 'admin' ? 'user.revoke_admin' : 'user.role') : 'user.edit', 'user', id, { changed, reason: b.reason });
+    await audit(req, b.role && b.role !== before.role ? (b.role === 'admin' ? 'user.grant_admin' : b.role === 'admin_manager' ? 'user.grant_admin_manager' : before.role === 'admin' || before.role === 'admin_manager' ? 'user.revoke_admin' : 'user.role') : 'user.edit', 'user', id, { changed, reason: b.reason });
     res.status(204).end();
   });
 
@@ -192,8 +195,9 @@ export function mountPeople(r: Router) {
     const id = uuid.parse(req.params.id);
     const { suspended, reason, notifyUser } = z.object({ suspended: z.boolean(), reason: z.string().max(300).optional(), notifyUser: z.boolean().default(false) }).parse(req.body);
     if (id === req.user.id) throw badRequest('You cannot suspend your own account');
-    const { data: p } = await db.from('profiles').select('deleted_at').eq('id', id).maybeSingle();
+    const { data: p } = await db.from('profiles').select('deleted_at, role').eq('id', id).maybeSingle();
     if (!p) throw notFound('User not found');
+    if (p.role === 'admin' || p.role === 'admin_manager') assertFullAdmin(req, 'suspend an admin');
     if (p.deleted_at && !suspended) throw badRequest('Deleted accounts stay closed');
     const now = new Date().toISOString();
     let { error } = await db.from('profiles').update({ is_suspended: suspended, suspended_reason: suspended ? reason ?? null : null, suspended_at: suspended ? now : null }).eq('id', id);
@@ -281,6 +285,44 @@ export function mountPeople(r: Router) {
     await closeAccount(id, { force: b.force });
     await audit(req, 'user.close', 'user', id, { reason: b.reason, force: b.force });
     res.status(204).end();
+  });
+
+  /**
+   * Delete an account permanently (migration 031): the sign-in, the profile and everything tied to it, including
+   * shared chats, bookings, tenancies and jobs. Payments and escrows stay (unlinked). Refused while money is in motion.
+   * Full admins only (managers are not allow-listed for this route).
+   */
+  r.post('/users/:id/delete', async (req, res) => {
+    const id = uuid.parse(req.params.id);
+    const b = z.object({ confirm: z.literal('DELETE'), reason: z.string().trim().min(3).max(300) }).parse(req.body);
+    if (id === req.user.id) throw badRequest('You cannot delete your own account');
+    const { data: p } = await db.from('profiles').select('id, first_name, last_name, email, phone, role, avatar_url').eq('id', id).maybeSingle();
+    if (!p) throw notFound('User not found');
+    if (p.role === 'admin') throw badRequest('Change their role from Admin first, then delete the account');
+
+    // Uploaded files to remove once the rows are gone (collected first: the rows hold the paths).
+    const [media, artisanDocs, verifs] = await Promise.all([
+      db.from('property_media').select('url, properties!inner(owner_id)').eq('properties.owner_id', id),
+      db.from('artisan_documents').select('storage_path').eq('user_id', id),
+      db.from('verifications').select('selfie_path, document_path, nimc_files').eq('user_id', id),
+    ]);
+    const publicFiles = [p.avatar_url, ...(media.data ?? []).map((m: any) => m.url)].filter(Boolean) as string[];
+    const privateFiles = [...(artisanDocs.data ?? []).map((d: any) => d.storage_path),
+      ...(verifs.data ?? []).flatMap((v: any) => [v.selfie_path, v.document_path, ...(Array.isArray(v.nimc_files) ? v.nimc_files.map((f: any) => f?.path) : [])])].filter(Boolean) as string[];
+
+    const { data: removed, error } = await db.rpc('admin_delete_user', { p_uid: id });
+    if (error) {
+      const m = error.message || '';
+      if (/MONEY_IN_MOTION/.test(m)) throw conflict(`Can't delete yet: ${m.replace(/^.*MONEY_IN_MOTION:\s*/, '')}. Settle it first, or close the account instead.`, 'MONEY_IN_MOTION');
+      if (/USER_NOT_FOUND/.test(m)) throw notFound('User not found');
+      if (/admin_delete_user|function .* does not exist/i.test(m)) throw badRequest('Run migration 031_admin_delete_user.sql to turn on permanent deletion', 'MIGRATION_REQUIRED');
+      throw dbError(error);
+    }
+    await audit(req, 'user.delete', 'user', id, { reason: b.reason, name: `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim(), email: p.email, phone: p.phone, role: p.role, removed });
+    res.json({ deleted: true, removed });
+    // Best effort, after replying: storage deletes can be slow.
+    for (const f of publicFiles) await deleteFromBunny(f).catch(() => {});
+    for (const f of privateFiles) await deleteFromBunny(f, true).catch(() => {});
   });
 
   // ───────── Identity verification review ─────────

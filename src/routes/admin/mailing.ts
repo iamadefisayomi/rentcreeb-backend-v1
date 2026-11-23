@@ -13,7 +13,7 @@ import { STARTER_TEMPLATES } from '../../services/mailingStarters';
 /**
  * Admin → Mailing: contacts, lists, templates, campaigns, automations, reports. See services/mailing.ts for the rules.
  */
-const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin'] as const;
+const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin_manager', 'admin'] as const;
 const audienceSchema = z.object({
   listIds: z.array(z.string().uuid()).default([]), tags: z.array(z.string().trim().min(1).max(40)).default([]), excludeTags: z.array(z.string().trim().min(1).max(40)).default([]),
   source: z.enum(['all', 'app_users', 'contacts']).default('all'), roles: z.array(z.enum(ROLES)).default([]), verification: z.enum(['any', 'verified', 'unverified']).default('any'),

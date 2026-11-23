@@ -402,7 +402,7 @@ async function onlineAgents() {
   const since = new Date(Date.now() - ONLINE_MS).toISOString();
   const { data } = await db.from('support_agents').select('admin_id, max_open, profiles!support_agents_admin_id_fkey(first_name, last_name, email, role, is_suspended)')
     .eq('available', true).gte('last_seen_at', since);
-  return (data ?? []).filter((a: any) => a.profiles?.role === 'admin' && !a.profiles?.is_suspended);
+  return (data ?? []).filter((a: any) => (a.profiles?.role === 'admin' || a.profiles?.role === 'admin_manager') && !a.profiles?.is_suspended);
 }
 export async function availableAgentCount() { try { return (await onlineAgents()).length; } catch { return 0; } }
 
