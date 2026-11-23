@@ -469,31 +469,138 @@
   }
 
   // ═════════ Overview ═════════
+  // Renders the last result straight away when you come back to it (no spinner), then refreshes in the background.
+  var lastOverview = null;
+  function changePct(cur, prev) { cur = Number(cur || 0); prev = Number(prev || 0); if (!prev) return cur ? null : 0; return Math.round(((cur - prev) / prev) * 100); }
+  function delta(cur, prev, label) {
+    var p = changePct(cur, prev);
+    if (p === null) return '<span class="delta up" title="Nothing in the 7 days before">new</span>';
+    var cls = p > 0 ? 'up' : p < 0 ? 'down' : 'flat';
+    return '<span class="delta ' + cls + '" title="' + esc(label || 'vs the 7 days before') + '">' + (p > 0 ? '▲ ' : p < 0 ? '▼ ' : '') + Math.abs(p) + '%</span>';
+  }
+  /** Tiny line of the last 14 days for a KPI tile. */
+  function spark(series) {
+    if (!series || series.length < 2) return '';
+    var s = series.slice(-14), w = 120, h = 30;
+    var max = Math.max.apply(null, s.map(function (d) { return Number(d.value); }).concat([1]));
+    var pts = s.map(function (d, i) { return (i * (w / (s.length - 1))).toFixed(1) + ',' + (h - 2 - (Number(d.value) / max) * (h - 4)).toFixed(1); });
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" aria-hidden="true"><polyline points="0,' + h + ' ' + pts.join(' ') + ' ' + w + ',' + h + '" class="area"/><polyline points="' + pts.join(' ') + '" class="line"/></svg>';
+  }
+  function kpi(value, labelText, extra, href, series) {
+    var tag = href ? 'a' : 'div';
+    return '<' + tag + ' class="card stat kpi"' + (href ? ' href="' + href + '"' : '') + '><span class="l">' + esc(labelText) + '</span><span class="n">' + value + '</span><div class="row between kpi-foot">' + (extra || '<span></span>') + spark(series) + '</div></' + tag + '>';
+  }
+  /** Horizontal bars: [[label, value, href?, tone?]] */
+  function hbars(items, fmt, empty) {
+    items = (items || []).filter(function (x) { return Number(x[1]) > 0; });
+    if (!items.length) return '<div class="empty">' + esc(empty || 'Nothing yet.') + '</div>';
+    var max = Math.max.apply(null, items.map(function (x) { return Number(x[1]); }));
+    var total = items.reduce(function (t, x) { return t + Number(x[1]); }, 0);
+    return '<div class="hbars">' + items.map(function (x) {
+      var w = Math.max(2, Math.round((Number(x[1]) / max) * 100));
+      var lab = x[2] ? '<a href="' + x[2] + '">' + esc(x[0]) + '</a>' : esc(x[0]);
+      return '<div class="hbar"><div class="hbar-top"><span>' + lab + '</span><span class="num">' + esc(fmt ? fmt(x[1]) : num(x[1])) + ' <span class="faint">' + Math.round((Number(x[1]) / total) * 100) + '%</span></span></div>' +
+        '<div class="hbar-track"><div class="hbar-fill ' + (x[3] || '') + '" style="width:' + w + '%"></div></div></div>';
+    }).join('') + '</div>';
+  }
+  /** Each step as a share of the first. */
+  function funnel(steps) {
+    var top = Number(steps[0][1]) || 1;
+    return '<div class="funnel">' + steps.map(function (s, i) {
+      var p = Math.round((Number(s[1]) / top) * 100);
+      return '<div class="funnel-step"><div class="funnel-bar" style="width:' + Math.max(p, 3) + '%"></div><div class="funnel-txt"><span>' + esc(s[0]) + '</span><span class="num"><b>' + num(s[1]) + '</b> <span class="faint">' + (i ? p + '%' : '') + '</span></span></div></div>';
+    }).join('') + '</div>';
+  }
+  var PURPOSE = { inspection: 'Inspection fees', subscription: 'Subscriptions', rent: 'Rent', rentsave: 'RentSave', job_escrow: 'Job payments', job_topup: 'Job top-ups', bill: 'Bills', utility: 'Utilities', wallet_topup: 'Wallet top-ups' };
+  var ROLE_NAMES = { tenant: 'Tenants', landlord: 'Landlords', estate_manager: 'Estate managers', agent: 'Agents', artisan: 'Artisans', developer: 'Developers', investor: 'Investors', admin: 'Admins', admin_manager: 'Admin managers' };
+  var LISTING_STATUS = { approved: ['Live', 'ok'], pending: ['Awaiting approval', 'warn'], rejected: ['Rejected', 'bad'], rented: ['Rented', 'violet'], archived: ['Archived', 'grey'], unlisted: ['Unlisted', 'grey'] };
+
   PAGES.overview = function () {
-    shell('overview', 'Overview', 'What needs attention right now.');
-    refreshCounts().then(function (o) {
-      shell('overview', 'Overview', 'What needs attention right now.');
-      var q = o.queues, u = o.users, a = o.activity;
-      var fmtN = function (n) { return typeof n === 'number' ? n.toLocaleString('en-NG') : n; };
-      var card = function (n, l, href, hot) { return '<a class="card stat' + (hot && n ? ' hot' : '') + '" href="' + href + '"><span class="n">' + fmtN(n) + '</span><span class="l">' + esc(l) + '</span></a>'; };
-      var plain = function (n, l) { return '<div class="card stat"><span class="n">' + fmtN(n) + '</span><span class="l">' + esc(l) + '</span></div>'; };
-      var banner = o.settings && o.settings.banner ? '<div class="alert info" style="margin-bottom:14px">App banner showing: “' + esc(o.settings.banner.message) + '” · <a href="#/system">edit</a></div>' : '';
-      view(banner + '<h2 class="section-title">Queues</h2><div class="grid cols-4">' +
-        card(q.manualVerifications, 'ID checks needing review', '#/verifications', 1) + card(q.pendingProperties, 'Listings awaiting approval', '#/listings', 1) +
-        card(q.pendingArtisans, 'Artisan applications', '#/artisans', 1) + card(q.openReports, 'Open reports', '#/reports', 1) + card(q.scamAlerts || 0, 'Scam alerts to review', '#/scam', 1) +
-        card(q.flaggedReviews, 'Flagged reviews', '#/reviews', 1) + card(q.openTickets, 'Open support tickets', '#/support', 1) +
-        (isManager() ? '' : card(q.pendingWithdrawals, 'Withdrawals pending over 1h', '#/withdrawals?tab=pending', 1) + card(q.stuckPayments, 'Payments stuck at pending', '#/payments?status=pending', 1)) + '</div>' +
-        '<h2 class="section-title">Platform</h2><div class="grid cols-4">' +
-        card(u.total, 'Users (' + u.new7d + ' new this week)', '#/users') + card(u.verified, 'NIN-verified users', '#/users?status=verified') +
-        plain(u.tenants, 'Tenants') + plain(u.landlords, 'Landlords & estate managers') + plain(u.agents, 'Agents') + plain(u.artisans, 'Artisans') +
-        card(u.suspended, 'Suspended accounts', '#/users?status=suspended') + card(a.liveProperties, 'Live listings', '#/listings?tab=approved') +
-        card(a.bookings7d, 'Bookings this week', '#/bookings') +
-        (isManager() ? '</div><div class="grid cols-2" style="margin-top:14px">' + section('Sign-ups, last 30 days', chart(o.trends.signups)) + '</div>' :
-        card(a.activeSubscriptions, 'Active subscriptions', '#/subscriptions') +
-        card(naira(a.paymentsKobo30d), 'Payments, last 30 days', '#/finance') + card(naira(a.escrowHeldKobo), 'Held in escrow (' + a.heldEscrows + ')', '#/escrow') + '</div>' +
-        '<div class="grid cols-2" style="margin-top:14px">' + section('Sign-ups, last 30 days', chart(o.trends.signups)) + section('Payments, last 30 days', chart(o.trends.paymentsKobo, naira)) + '</div>' +
-        '<h2 class="section-title">Recent admin activity <a class="btn sm" href="#/audit">Full audit log →</a></h2><div class="card">' + actionsTable(o.recentActions) + '</div>'));
-    }).catch(fail);
+    var head = function (o) {
+      var when_ = o && o.generatedAt ? 'Updated ' + ago(o.generatedAt) : '';
+      shell('overview', 'Overview', 'What needs attention, and how RentCreeb is doing.', '<span class="faint" id="ov-upd">' + esc(when_) + '</span><button class="btn sm" id="ov-refresh">Refresh</button>');
+      on('ov-refresh', function () { $('#ov-upd').textContent = 'Refreshing…'; api('/admin/overview?fresh=1').then(function (x) { counts = Object.assign({}, x.queues); lastOverview = x; draw(x); }).catch(function (e) { toast(e.message, true); }); });
+    };
+    var draw = function (o) {
+      head(o);
+      var q = o.queues || {}, u = o.users || {}, a = o.activity || {}, m = o.money, l = o.listings || {}, t = o.trends || {}, rc = o.recent || {};
+      var full = !isManager() && !!m;
+      var banner = o.settings && o.settings.maintenanceMode ? '<div class="alert bad" style="margin-bottom:14px">Maintenance mode is ON: the app is closed to users. <a href="#/system">Turn it off</a></div>'
+        : o.settings && o.settings.banner ? '<div class="alert info" style="margin-bottom:14px">App banner showing: “' + esc(o.settings.banner.message) + '” · <a href="#/system">edit</a></div>' : '';
+
+      // 1. Queues: what needs a person
+      var queue = [['manualVerifications', 'ID checks', '#/verifications'], ['pendingProperties', 'Listings to approve', '#/listings'], ['pendingArtisans', 'Artisan applications', '#/artisans'],
+        ['openReports', 'Open reports', '#/reports'], ['scamAlerts', 'Scam alerts', '#/scam'], ['flaggedReviews', 'Flagged reviews', '#/reviews'], ['openTickets', 'Support tickets', '#/support']]
+        .concat(full ? [['pendingWithdrawals', 'Withdrawals over 1h', '#/withdrawals?tab=pending'], ['stuckPayments', 'Stuck payments', '#/payments?status=pending']] : []);
+      var waiting = queue.reduce(function (n, x) { return n + Number(q[x[0]] || 0); }, 0);
+      var queues = '<div class="queue-grid">' + queue.map(function (x) {
+        var n = Number(q[x[0]] || 0);
+        return '<a class="queue' + (n ? ' hot' : '') + '" href="' + x[2] + '"><span class="qn">' + num(n) + '</span><span class="ql">' + esc(x[1]) + '</span></a>';
+      }).join('') + '</div>';
+
+      // 2. KPIs, last 7 days vs the 7 before
+      var kpis = '<div class="grid cols-' + (full ? 5 : 4) + '">' +
+        kpi(num(u.new7d), 'New users · 7 days', delta(u.new7d, u.newPrev7d), '#/users', t.signups) +
+        kpi(num(a.bookings7d), 'Bookings · 7 days', delta(a.bookings7d, a.bookingsPrev7d), '#/bookings') +
+        (full ? kpi(esc(naira(m.payments7dKobo)), 'Payments · 7 days', delta(m.payments7dKobo, m.paymentsPrev7dKobo), '#/finance', t.paymentsKobo) : '') +
+        kpi(num(l.new7d), 'New listings · 7 days', delta(l.new7d, l.newPrev7d), '#/listings', t.listings) +
+        kpi(num(a.waitlist), 'On the waitlist', '<span class="delta up">+' + num(a.waitlist7d) + ' this week</span>', '#/waitlist') + '</div>';
+
+      // 3. Money
+      var money = full ? '<h2 class="section-title">Money</h2><div class="grid cols-3 money-grid">' +
+        kpi(esc(naira(m.revenue30dKobo)), 'RentCreeb revenue · 30 days', '<span class="faint">plans + escrow fees</span>', '#/finance') +
+        kpi(esc(naira(m.payments30dKobo)), 'Payments · 30 days', '<span class="faint">' + num(m.paymentsCount30d) + ' payments' + (m.failed7d ? ' · ' + num(m.failed7d) + ' failed this week' : '') + '</span>', '#/payments') +
+        kpi(esc(naira(Number(m.escrowHeldKobo) + Number(m.walletsKobo) + Number(m.withdrawalsPendingKobo))), 'Money held for users', '<span class="faint">escrow ' + esc(naira(m.escrowHeldKobo)) + ' · wallets ' + esc(naira(m.walletsKobo)) + ' · payouts ' + esc(naira(m.withdrawalsPendingKobo)) + '</span>', '#/escrow') +
+        '</div>' : '';
+
+      // 4. Trends
+      var trends = '<div class="grid cols-2" style="margin-top:14px">' + section('Sign-ups, last 30 days', chart(t.signups)) +
+        (full && t.paymentsKobo ? section('Payments, last 30 days', chart(t.paymentsKobo, naira)) : section('New listings, last 30 days', chart(t.listings))) + '</div>';
+
+      // 5. People and listings
+      var byRole = Object.keys(u.byRole || {}).map(function (k) { return [ROLE_NAMES[k] || k, u.byRole[k], '#/users?role=' + k]; }).sort(function (x, y) { return y[1] - x[1]; });
+      if (!byRole.length) byRole = [['Tenants', u.tenants], ['Landlords & estate managers', u.landlords], ['Agents', u.agents], ['Artisans', u.artisans]];
+      var byStatus = Object.keys(l.byStatus || {}).map(function (k) { var s = LISTING_STATUS[k] || [k, '']; return [s[0], l.byStatus[k], '#/listings?tab=' + k, s[1]]; }).sort(function (x, y) { return y[1] - x[1]; });
+      var people = '<h2 class="section-title">People & listings</h2><div class="grid cols-3">' +
+        section('Users by role', hbars(byRole, null, 'No users yet.'), '<span class="faint">' + num(u.total) + ' total' + (u.today ? ' · ' + num(u.today) + ' today' : '') + '</span>') +
+        section('Verification funnel', funnel([['Signed up', u.total], ['Finished onboarding', u.onboarded], ['Phone verified', u.phoneVerified], ['NIN verified', u.verified]].filter(function (x) { return x[1] != null; })) +
+          (u.suspended ? '<div class="faint" style="margin-top:8px"><a href="#/users?status=suspended">' + num(u.suspended) + ' suspended</a></div>' : '')) +
+        section('Listings by status', hbars(byStatus, null, 'No listings yet.'), '<span class="faint">' + num(a.liveProperties) + ' live</span>') + '</div>';
+
+      // 6. Where, and what money is for
+      var cities = (l.topCities || []);
+      var where = '<div class="grid cols-' + (full ? 2 : 1) + '" style="margin-top:14px">' +
+        section('Top cities (live listings)', cities.length ? table(['City', 'Live listings', 'Average price'], cities, function (c) {
+          return '<tr><td><b>' + esc(c.city) + '</b></td><td class="num">' + num(c.n) + '</td><td class="num">' + esc(naira(c.avgKobo)) + '</td></tr>'; }) : '<div class="empty">No live listings yet.</div>') +
+        (full ? section('What people paid for · 30 days', hbars((m.byPurpose30d || []).map(function (p) { return [PURPOSE[p.purpose] || p.purpose, p.kobo, '#/payments?purpose=' + p.purpose]; }), naira, 'No payments in the last 30 days.')) : '') + '</div>';
+
+      // 7. Operations
+      var ops = '<h2 class="section-title">Operations</h2><div class="ops">' + [
+        [a.activeTenancies, 'Active tenancies', '#/tenancies'], [a.openJobs, 'Open repair jobs', '#/jobs'], [a.heldEscrows, 'Escrows held', full ? '#/escrow' : null],
+        [a.activeSubscriptions, 'Active subscriptions', full ? '#/subscriptions' : null], [a.tickets7d, 'Support tickets this week', '#/support'], [a.liveProperties, 'Live listings', '#/listings?tab=approved'],
+      ].filter(function (x) { return x[0] != null; }).map(function (x) {
+        return (x[2] ? '<a class="op" href="' + x[2] + '">' : '<div class="op">') + '<b>' + num(x[0]) + '</b><span>' + esc(x[1]) + '</span>' + (x[2] ? '</a>' : '</div>');
+      }).join('') + '</div>';
+
+      // 8. Recent
+      var signups = (rc.signups || []).map(function (p) {
+        return '<a class="feed-row" href="#/users/' + esc(p.id) + '">' + avatar(p) + '<div class="grow"><b>' + name(p) + '</b><div class="faint">' + label(ROLE_NAMES[p.role] ? ROLE_NAMES[p.role].replace(/s$/, '') : p.role) + ' · ' + esc(p.email || '') + '</div></div>' +
+          '<div class="feed-meta">' + (p.nin_verified ? badge('NIN', 'ok') : p.phone_verified ? badge('Phone', 'warn') : '') + '<span class="faint">' + esc(ago(p.created_at)) + '</span></div></a>';
+      }).join('') || '<div class="empty">No sign-ups yet.</div>';
+      var pays = full ? (rc.payments || []).map(function (p) {
+        return '<div class="feed-row">' + '<div class="pay-ico">₦</div><div class="grow"><b>' + esc(naira(p.amount_kobo)) + '</b> <span class="faint">' + esc(PURPOSE[p.purpose] || p.purpose) + '</span><div class="faint">' + (p.user ? userLink(p.user) : '—') + '</div></div>' +
+          '<div class="feed-meta">' + statusBadge(p.status) + '<span class="faint">' + esc(ago(p.paid_at || p.created_at)) + '</span></div></div>';
+      }).join('') || '<div class="empty">No payments yet.</div>' : '';
+      var recent = '<h2 class="section-title">Latest</h2><div class="grid cols-' + (full ? 2 : 1) + '">' + section('New sign-ups', '<div class="feed">' + signups + '</div>', '<a class="btn sm" href="#/users">All users →</a>') +
+        (full ? section('Latest payments', '<div class="feed">' + pays + '</div>', '<a class="btn sm" href="#/payments">All payments →</a>') : '') + '</div>';
+
+      var activity = full ? '<h2 class="section-title">Recent admin activity <a class="btn sm" href="#/audit">Full audit log →</a></h2><div class="card">' + actionsTable(o.recentActions) + '</div>' : '';
+
+      view(banner + '<h2 class="section-title">Needs attention ' + (waiting ? badge(num(waiting) + ' waiting', 'bad') : badge('All clear', 'ok')) + '</h2>' + queues +
+        '<h2 class="section-title">Last 7 days</h2>' + kpis + money + trends + people + where + ops + recent + activity);
+    };
+    if (lastOverview) draw(lastOverview); else head(null);
+    refreshCounts().then(function (o) { lastOverview = o; if ((parse().path[0] || 'overview') === 'overview') draw(o); }).catch(function (e) { if (!lastOverview) fail(e); });
   };
 
   function actionsTable(rows) {

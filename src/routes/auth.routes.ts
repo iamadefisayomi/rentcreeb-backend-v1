@@ -6,7 +6,7 @@ import { badRequest, conflict, HttpError, unauthorized } from '../lib/errors';
 import { passwordSchema, phoneSchema } from '../lib/common';
 import { issueOtp, verifyOtp } from '../lib/otp';
 import { sendSms } from '../lib/sms';
-import { authenticate } from '../middleware/auth';
+import { authenticate, forgetToken } from '../middleware/auth';
 import { logger } from '../lib/logger';
 import { isWebUrl, verifyBetterAuthHash } from '../lib/webAuth';
 
@@ -152,6 +152,7 @@ r.post('/refresh', async (req, res) => {
 r.post('/logout', authenticate, async (req, res) => {
   const token = req.headers.authorization!.slice(7);
   await db.auth.admin.signOut(token);
+  forgetToken(token);
   res.status(204).end();
 });
 

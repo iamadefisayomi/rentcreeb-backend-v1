@@ -42,7 +42,7 @@ const timed = async <T>(fn: () => Promise<T>, ms = 12_000): Promise<T | { ok: fa
 
 export function mountPlatform(r: Router) {
   // ───────── Overview ─────────
-  r.get('/overview', async (req, res) => {
+  async function legacyOverview(req: any) {
     const d30 = new Date(Date.now() - 30 * 864e5).toISOString();
     const d7 = new Date(Date.now() - 7 * 864e5).toISOString();
     const h1 = new Date(Date.now() - 3600e3).toISOString();
@@ -69,7 +69,7 @@ export function mountPlatform(r: Router) {
       count('scam_alerts', (q) => q.in('status', ['open', 'reported'])),
     ]);
     const settings = await getSettings();
-    if (req.user.role !== 'admin') return res.json({ // managers: no money figures or audit trail
+    if (req.user.role !== 'admin') return ({ // managers: no money figures or audit trail
       role: req.user.role,
       users: { total: users, new7d: newUsers7d, tenants, landlords, agents, artisans, suspended, verified },
       queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, scamAlerts },
@@ -78,7 +78,7 @@ export function mountPlatform(r: Router) {
       settings: { maintenanceMode: settings.maintenanceMode, banner: settings.banner },
       recentActions: [],
     });
-    res.json({
+    return ({
       role: req.user.role,
       users: { total: users, new7d: newUsers7d, tenants, landlords, agents, artisans, suspended, verified },
       queues: { pendingProperties, pendingArtisans, manualVerifications, openReports, openTickets, flaggedReviews, pendingWithdrawals, stuckPayments, scamAlerts },
@@ -87,6 +87,38 @@ export function mountPlatform(r: Router) {
       settings: { maintenanceMode: settings.maintenanceMode, banner: settings.banner },
       recentActions: recent.error ? [] : recent.data,
     });
+  }
+
+  /**
+   * One database call (admin_overview, migration 033) instead of ~25 queries, cached for 15 seconds per view
+   * (full admin / manager) because every open dashboard asks for it once a minute for the sidebar badges.
+   * ?fresh=1 skips the cache. Falls back to the old per-table queries until 033 is applied.
+   */
+  const overviewCache = new Map<string, { at: number; body: any }>();
+  r.get('/overview', async (req, res) => {
+    const full = req.user.role === 'admin';
+    const key = full ? 'full' : 'manager';
+    const hit = overviewCache.get(key);
+    if (hit && Date.now() - hit.at < 15_000 && req.query.fresh !== '1') return res.json({ ...hit.body, role: req.user.role, cached: true });
+    const [stats, settings, recent] = await Promise.all([
+      db.rpc('admin_overview', { p_full: full }),
+      getSettings(),
+      full ? db.from('admin_actions').select('id, action, target_type, target_id, details, created_at, admin:profiles!admin_actions_admin_id_fkey(first_name, last_name)').order('created_at', { ascending: false }).limit(12)
+        : Promise.resolve({ data: [], error: null } as any),
+    ]);
+    if (stats.error) {
+      if (!/admin_overview/.test(stats.error.message ?? '')) logger.warn({ err: stats.error.message }, 'admin_overview failed; using the slow path');
+      return res.json(await legacyOverview(req));
+    }
+    const o: any = stats.data;
+    const body = {
+      ...o, v: 2,
+      activity: { ...o.activity, ...(full ? { paymentsKobo30d: o.money?.payments30dKobo, escrowHeldKobo: o.money?.escrowHeldKobo } : {}) },
+      settings: { maintenanceMode: settings.maintenanceMode, banner: settings.banner },
+      recentActions: recent.error ? [] : recent.data ?? [],
+    };
+    overviewCache.set(key, { at: Date.now(), body });
+    res.json({ ...body, role: req.user.role });
   });
 
   // ───────── Global search ─────────
