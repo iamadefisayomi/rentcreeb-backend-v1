@@ -69,7 +69,12 @@ export function createApp() {
       connectSrc: ["'self'"], frameAncestors: ["'none'"], formAction: ["'self'"], objectSrc: ["'none'"], baseUri: ["'self'"],
     } },
     referrerPolicy: { policy: 'no-referrer' },
-  }), express.static(path.resolve(__dirname, '..', 'admin'), { index: 'index.html', maxAge: '5m' }));
+  }), express.static(path.resolve(__dirname, '..', 'admin'), {
+    index: 'index.html', maxAge: '5m',
+    // The page and its script are re-checked on every load (cheap 304s via ETag), so a deploy reaches admins at once
+    // instead of an old admin.js running for up to 5 minutes. Images and fonts keep the 5-minute cache.
+    setHeaders: (res, file) => { if (/\.(html|js|css)$/.test(file)) res.setHeader('Cache-Control', 'no-cache'); },
+  }));
 
   const general = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false });
   const strict = rateLimit({ windowMs: 15 * 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });

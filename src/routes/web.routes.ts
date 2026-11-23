@@ -7,6 +7,8 @@ import { badRequest, conflict, HttpError } from '../lib/errors';
 import { passwordSchema } from '../lib/common';
 import { authenticate, requireRole } from '../middleware/auth';
 import { sendEmail } from '../lib/email';
+import { logger } from '../lib/logger';
+import { sendWaitlistWelcome } from '../services/mailing';
 import { isWebUrl, makeLinkToken, readLinkToken } from '../lib/webAuth';
 import { aiChat, aiEnabled } from '../lib/ai';
 
@@ -193,15 +195,22 @@ const waitlistBody = z.object({
 });
 r.post('/waitlist', limiter, async (req, res) => {
   const b = waitlistBody.parse(req.body);
-  const { data: existing } = await db.from('mailing_contacts').select('id, tags').eq('email', b.email).maybeSingle();
+  const { data: existing } = await db.from('mailing_contacts').select('id, tags, status, attributes').eq('email', b.email).maybeSingle();
   if (existing?.tags?.includes('waitlist')) return res.status(409).json({ success: false, message: 'This email has already joined the waitlist.' });
   const [first, ...rest] = b.name.split(/\s+/);
-  const attributes = { phone: b.phone, state: b.state ?? '', lga: b.lga ?? '', city: b.city ?? '', interest: b.interest, iAm: b.iAm, message: b.message, waitlistStatus: 'pending', waitlistSource: b.source };
+  const attributes = { phone: b.phone, state: b.state ?? '', lga: b.lga ?? '', city: b.city ?? '', interest: b.interest, iAm: b.iAm, message: b.message, waitlistStatus: 'pending', waitlistSource: b.source, waitlistJoinedAt: new Date().toISOString() };
   const row = existing
-    ? unwrap(await db.from('mailing_contacts').update({ tags: [...new Set([...(existing.tags ?? []), 'waitlist'])], attributes, updated_at: new Date().toISOString() }).eq('id', existing.id).select().single())
+    ? unwrap(await db.from('mailing_contacts').update({
+      tags: [...new Set([...(existing.tags ?? []), 'waitlist'])], attributes: { ...(existing.attributes ?? {}), ...attributes }, updated_at: new Date().toISOString(),
+      // Joining the waitlist is a fresh opt-in for someone who had unsubscribed (never for bounced / spam-complaint addresses).
+      ...(existing.status === 'unsubscribed' ? { status: 'subscribed', consent_at: new Date().toISOString() } : {}),
+    }).eq('id', existing.id).select().single())
     : unwrap(await db.from('mailing_contacts').insert({ email: b.email, first_name: first, last_name: rest.join(' ') || null, source: 'signup_form', status: 'subscribed', consent_at: new Date().toISOString(), confirmed_at: new Date().toISOString(), tags: ['waitlist'], attributes }).select().single());
-  // Welcome email to the person, and a note to the RentCreeb inbox.
-  void sendEmail(b.email, "🎉 You're on the RentCreeb 2.0 Waitlist!", emailHtml(first, "Thanks for joining the RentCreeb 2.0 waitlist. We'll let you know as soon as it's ready for you.", env.WEB_BASE_URL, 'Visit RentCreeb'));
+  // Welcome email straight away: the "Waitlist welcome" automation (Admin → Mailing → Automations), or a plain fallback
+  // if it's switched off or mailing isn't set up. And a note to the RentCreeb inbox.
+  void sendWaitlistWelcome(row.id).then((done) => done ? undefined :
+    sendEmail(b.email, "🎉 You're on the RentCreeb waitlist!", emailHtml(first, "Thanks for joining the RentCreeb waitlist. We'll let you know as soon as it's ready for you.", env.WEB_BASE_URL, 'Visit RentCreeb')))
+    .catch((err) => logger.warn({ err: err?.message }, 'waitlist welcome email failed'));
   void sendEmail(env.WEB_CONTACT_EMAIL, `New Waitlist Signup • ${b.name}`, plainHtml([
     ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['State', b.state ?? ''], ['LGA', b.lga ?? ''], ['City', b.city ?? ''],
     ['Interest', b.interest.join(', ')], ['I am', b.iAm], ['Message', b.message || 'None'],

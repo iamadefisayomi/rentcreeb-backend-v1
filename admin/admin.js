@@ -1094,7 +1094,8 @@
   function wlLabel(s) { var f = WL_STATUS.filter(function (x) { return x[0] === s; })[0]; return f ? f[1] : s; }
   PAGES.waitlist = function (r) {
     var page = Number(r.q.page || 1); var f = { q: r.q.q, status: r.q.status };
-    shell('waitlist', 'Waitlist', 'People who joined the waitlist on rentcreeb.com.', '<button class="btn sm" id="wl-export">Export CSV</button>');
+    shell('waitlist', 'Waitlist', 'People who joined the waitlist on rentcreeb.com. New sign-ups get the “Waitlist welcome” email straight away (Mailing → Automations).',
+      isManager() ? '' : '<button class="btn sm" id="wl-export">Export CSV</button><a class="btn sm primary" href="#/mail-campaigns/new?for=waitlist">Email the waitlist</a>');
     api('/admin/waitlist' + qs(Object.assign({ page: page, limit: PAGE }, f))).then(function (j) {
       var s = j.summary; var items = j.items;
       var stat = function (n, l) { return '<div class="card stat"><span class="n">' + num(n) + '</span><span class="l">' + esc(l) + '</span></div>'; };
@@ -1654,6 +1655,8 @@
     var checks = function (name, opts, vals) { return '<div class="checks">' + opts.map(function (o) { return '<label class="check"><input type="checkbox" name="' + name + '" value="' + esc(o[0]) + '"' + ((vals || []).indexOf(o[0]) >= 0 ? ' checked' : '') + '><span>' + esc(o[1]) + '</span></label>'; }).join('') + '</div>'; };
     return '<div class="stack" id="aud">' +
       '<label class="field"><span>Who</span><select class="input" id="aud-source"><option value="all"' + (a.source === 'all' || !a.source ? ' selected' : '') + '>Everyone (app users and outside contacts)</option><option value="app_users"' + (a.source === 'app_users' ? ' selected' : '') + '>App users only</option><option value="contacts"' + (a.source === 'contacts' ? ' selected' : '') + '>Outside contacts only (not app users)</option></select></label>' +
+      '<div class="field"><label class="check"><input type="checkbox" id="aud-wl"' + (a.waitlist ? ' checked' : '') + '><span><b>Only people on the waitlist</b> (everyone who joined on rentcreeb.com, including before the welcome email existed)</span></label>' +
+        '<div id="aud-wl-st" style="margin-top:6px"' + (a.waitlist ? '' : ' hidden') + '><span class="faint">Waitlist status <span class="faint">(none ticked = all)</span></span>' + checks('aud-wls', WL_STATUS, a.waitlistStatuses) + '</div></div>' +
       (lists.length ? '<div class="field"><span>Only people on these lists <span class="faint">(none ticked = no list filter)</span></span>' + checks('aud-list', lists.map(function (l) { return [l.id, l.name + ' (' + l.members + ')']; }), a.listIds) + '</div>' : '') +
       '<div class="field"><span>App users with these roles <span class="faint">(none = any role)</span></span>' + checks('aud-role', ROLE_OPTS, a.roles) + '</div>' +
       '<div class="grid cols-2 tight"><label class="field"><span>ID verification</span><select class="input" id="aud-ver"><option value="any">Any</option><option value="verified"' + (a.verification === 'verified' ? ' selected' : '') + '>NIN-verified only</option><option value="unverified"' + (a.verification === 'unverified' ? ' selected' : '') + '>Not verified yet</option></select></label>' +
@@ -1661,10 +1664,13 @@
       '<label class="field"><span>Leave out people tagged</span><input class="input" id="aud-xtags" placeholder="e.g. do-not-email" value="' + esc((a.excludeTags || []).join(', ')) + '"></label></div>' +
       '<div class="row"><button type="button" class="btn" id="aud-est-btn">Count recipients</button><span id="aud-est" class="faint"></span></div></div>';
   }
+  document.addEventListener('change', function (e) { if (e.target && e.target.id === 'aud-wl') { var st = $('#aud-wl-st'); if (st) st.hidden = !e.target.checked; } });
   function splitTags(v) { return String(v || '').split(/[,;]/).map(function (t) { return t.trim().toLowerCase(); }).filter(Boolean); }
   function readAudience() {
     var vals = function (n) { return $$('input[name="' + n + '"]:checked').map(function (x) { return x.value; }); };
-    return { source: $('#aud-source').value, listIds: vals('aud-list'), roles: vals('aud-role'), verification: $('#aud-ver').value, tags: splitTags($('#aud-tags').value), excludeTags: splitTags($('#aud-xtags').value) };
+    var wl = $('#aud-wl').checked;
+    return { source: $('#aud-source').value, listIds: vals('aud-list'), roles: vals('aud-role'), verification: $('#aud-ver').value, tags: splitTags($('#aud-tags').value), excludeTags: splitTags($('#aud-xtags').value),
+      waitlist: wl, waitlistStatuses: wl ? vals('aud-wls') : [] };
   }
   function estimate(kind) {
     var el = $('#aud-est'); el.textContent = 'Counting…';
@@ -1703,6 +1709,10 @@
   PAGES['mail-campaigns'] = function (r) {
     if (r.path[1] === 'new') {
       shell('mail-campaigns', 'New campaign', '');
+      if (r.q.for === 'waitlist') return api('/admin/mailing/templates').then(function (t) {
+        var tpl = (t.templates || []).filter(function (x) { return x.name === 'Waitlist update'; })[0] || {};
+        return post('/admin/mailing/campaigns', { name: 'Waitlist update ' + day(new Date().toISOString()), subject: tpl.subject || '', preheader: tpl.preheader || null, html: tpl.html || STARTER, audience: { waitlist: true } });
+      }).then(function (j) { location.replace('#/mail-campaigns/' + j.campaign.id); }).catch(mailFail);
       return post('/admin/mailing/campaigns', { name: 'Untitled campaign ' + day(new Date().toISOString()), html: STARTER }).then(function (j) { location.replace('#/mail-campaigns/' + j.campaign.id); }).catch(mailFail);
     }
     if (r.path[1]) return campaignPage(r.path[1]);
@@ -2000,7 +2010,7 @@
   };
 
   // ── automations ──
-  var TRIGGERS = [['user_signup', 'Someone creates a RentCreeb account'], ['contact_added', 'A new outside contact is added (import, sign-up form, by hand)'], ['list_joined', 'Someone joins a list']];
+  var TRIGGERS = [['user_signup', 'Someone creates a RentCreeb account'], ['contact_added', 'A new outside contact is added (import, sign-up form, by hand)'], ['list_joined', 'Someone joins a list'], ['waitlist_joined', 'Someone joins the waitlist on the website (sent the moment they sign up)']];
   function delayText(h) { return !h ? 'straight away' : h % 24 ? h + ' hour' + (h > 1 ? 's' : '') + ' later' : h / 24 + ' day' + (h > 24 ? 's' : '') + ' later'; }
   PAGES['mail-automations'] = function (r) {
     if (r.path[1]) return automationPage(r.path[1]);

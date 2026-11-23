@@ -23,6 +23,8 @@ export type Audience = {
   listIds?: string[]; tags?: string[]; excludeTags?: string[];
   source?: 'all' | 'app_users' | 'contacts';
   roles?: string[]; verification?: 'any' | 'verified' | 'unverified';
+  /** Only people on the website waitlist (contacts tagged "waitlist"); `waitlistStatuses` narrows it (empty = all). */
+  waitlist?: boolean; waitlistStatuses?: string[];
 };
 export type Contact = {
   id: string; email: string; first_name: string | null; last_name: string | null; user_id: string | null; source: string; status: string;
@@ -232,6 +234,10 @@ export async function resolveAudience(a: Audience, kind: Kind, opts: { sync?: bo
     contacts = contacts.filter((c) => set.has(c.id));
   }
   if (a.tags?.length) contacts = contacts.filter((c) => c.tags?.some((t) => a.tags!.includes(t)));
+  if (a.waitlist) {
+    contacts = contacts.filter((c) => c.tags?.includes('waitlist'));
+    if (a.waitlistStatuses?.length) contacts = contacts.filter((c) => a.waitlistStatuses!.includes(String((c.attributes as any)?.waitlistStatus || 'pending')));
+  }
   if (a.excludeTags?.length) contacts = contacts.filter((c) => !c.tags?.some((t) => a.excludeTags!.includes(t)));
   const appOnly = a.source === 'app_users' || !!a.roles?.length || (a.verification && a.verification !== 'any');
   if (appOnly) contacts = contacts.filter((c) => c.user_id);
@@ -285,6 +291,14 @@ export async function enqueueAutomations() {
       } else if (a.trigger === 'contact_added') {
         const { data } = await db.from('mailing_contacts').select('id, email, created_at').gte('created_at', since).neq('source', 'app_user').limit(2000);
         hits = (data ?? []).map((c: any) => ({ contact_id: c.id, email: c.email, at: c.created_at }));
+      } else if (a.trigger === 'waitlist_joined') {
+        // Normally already sent by sendWaitlistWelcome() at sign-up; this catches anyone it missed (and imports tagged "waitlist").
+        const [joined, added] = await Promise.all([
+          db.from('mailing_contacts').select('id, email, attributes').contains('tags', ['waitlist']).gte('attributes->>waitlistJoinedAt', since).limit(2000),
+          db.from('mailing_contacts').select('id, email, created_at').contains('tags', ['waitlist']).is('attributes->>waitlistJoinedAt', null).gte('created_at', since).limit(2000),
+        ]);
+        hits = [...(joined.data ?? []).map((c: any) => ({ contact_id: c.id, email: c.email, at: c.attributes.waitlistJoinedAt })),
+          ...(added.data ?? []).map((c: any) => ({ contact_id: c.id, email: c.email, at: c.created_at }))];
       } else if (a.trigger === 'list_joined' && a.list_id) {
         const { data } = await db.from('mailing_list_members').select('added_at, contact:mailing_contacts(id, email)').eq('list_id', a.list_id).eq('status', 'subscribed').gte('added_at', since).limit(2000);
         hits = (data ?? []).filter((m: any) => m.contact).map((m: any) => ({ contact_id: m.contact.id, email: m.contact.email, at: m.added_at }));
@@ -295,6 +309,40 @@ export async function enqueueAutomations() {
       }
     } catch (err) { logger.error({ err, automation: a.id }, 'automation enqueue failed'); }
   }
+}
+
+/**
+ * Send the live "waitlist_joined" automation(s) to someone the moment they join, instead of waiting for the minute job.
+ * Returns false when there is no live welcome automation or email isn't set up, so the caller can send a plain fallback.
+ * The send is recorded in mailing_sends (one per automation and contact), so the minute job never sends it twice.
+ */
+export async function sendWaitlistWelcome(contactId: string) {
+  if (!emailEnabled() || !env.API_PUBLIC_URL) return false;
+  const { data: autos } = await db.from('mailing_automations').select('*').eq('active', true).eq('trigger', 'waitlist_joined').eq('delay_hours', 0);
+  if (!autos?.length) return false;
+  const { data: c } = await db.from('mailing_contacts').select(CONTACT_COLS).eq('id', contactId).maybeSingle();
+  if (!c) return false;
+  const profile = c.user_id ? (await profilesById([c.user_id])).get(c.user_id) : null;
+  let handled = false;
+  for (const a of autos) {
+    const why = blockedReason(a.kind, c as Contact, profile);
+    const { data: row } = await db.from('mailing_sends').upsert({ automation_id: a.id, contact_id: c.id, email: c.email, send_after: new Date().toISOString(), status: why ? 'skipped' : 'sending', error: why },
+      { onConflict: 'automation_id,contact_id', ignoreDuplicates: true }).select('id').maybeSingle();
+    if (!row) continue; // already had it
+    handled = true; // sent, queued, or deliberately skipped (e.g. bounced address): no fallback email either way
+    if (why) continue;
+    try {
+      const [id] = await sendEmailBatch([message(a, c as Contact, row.id)]);
+      const at = new Date().toISOString();
+      await db.from('mailing_sends').update({ status: 'sent', provider_id: id ?? null, sent_at: at, attempts: 1 }).eq('id', row.id);
+      await db.from('mailing_contacts').update({ last_sent_at: at }).eq('id', c.id);
+    } catch (err: any) {
+      // Leave it to the minute job to retry.
+      logger.warn({ err: err?.message }, 'waitlist welcome send failed; queued for retry');
+      await db.from('mailing_sends').update({ status: 'queued', attempts: 1, send_after: new Date(Date.now() + 60_000).toISOString(), error: String(err?.message ?? err).slice(0, 300) }).eq('id', row.id);
+    }
+  }
+  return handled;
 }
 
 let running = false;

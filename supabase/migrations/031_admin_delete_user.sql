@@ -4,8 +4,8 @@
 -- everything tied to it, including records shared with other people (their chats, bookings, tenancies, jobs,
 -- maintenance requests and reviews with this user, and this user's listings).
 -- Kept but unlinked (user set to null): payments and escrows, so finance totals stay right.
--- Refused while money is in motion: a wallet or RentSave balance, held escrow, a pending withdrawal, an active tenancy,
--- or a paid / confirmed booking. Settle those first, or use "Close account" (anonymise) instead.
+-- Refused while money is in motion: a wallet or RentSave balance, held escrow, a pending withdrawal, a payment started
+-- in the last day that hasn't finished, an active tenancy, or a paid / confirmed booking. Settle those first, or use "Close account" (anonymise) instead.
 --
 -- Only the API (service role) may run it.
 
@@ -28,6 +28,7 @@ begin
     when exists (select 1 from rentsave_plans where tenant_id = p_uid and saved_kobo > 0) then 'they have money saved in RentSave'
     when exists (select 1 from escrows where (payer_id = p_uid or payee_id = p_uid) and status = 'held') then 'money is held in escrow for them'
     when exists (select 1 from withdrawals where user_id = p_uid and status = 'pending') then 'a withdrawal is still pending'
+    when exists (select 1 from payments where user_id = p_uid and status = 'pending' and created_at > now() - interval '1 day') then 'a payment of theirs is still being processed (try again tomorrow)'
     when exists (select 1 from tenancies where (landlord_id = p_uid or tenant_id = p_uid) and status = 'active') then 'they have an active tenancy'
     when exists (select 1 from bookings where (tenant_id = p_uid or host_id = p_uid) and status in ('paid', 'confirmed')) then 'they have a paid or confirmed booking'
   end into v_problem;

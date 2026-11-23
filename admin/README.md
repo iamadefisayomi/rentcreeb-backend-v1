@@ -17,6 +17,13 @@ update profiles set role = 'admin' where email = 'person@example.com';
 
 Anyone without the admin role is refused, both in the page and by the API. You can't change your own role or suspend yourself.
 
+### Waitlist emails
+
+- **Welcome email:** everyone who joins the waitlist on the website gets the **Waitlist welcome** email the moment they sign up (migration `032_waitlist_welcome.sql`).
+  Edit the wording, or switch it off, in Mailing → Automations. If it's off, or email isn't set up, they get a short plain thank-you instead.
+- **Updates to the whole waitlist:** Waitlist → **Email the waitlist** opens a new campaign aimed at everyone on the waitlist, including people who joined before the welcome email existed,
+  pre-filled from the **Waitlist update** template. Any campaign can do the same: tick **Only people on the waitlist** in Audience and, if you like, pick waitlist statuses (e.g. only *Pending*).
+
 ### Deleting an account permanently
 
 Users → person → Actions → **Delete permanently** (full admins only; needs migration `031_admin_delete_user.sql`). You type `DELETE` and a reason.

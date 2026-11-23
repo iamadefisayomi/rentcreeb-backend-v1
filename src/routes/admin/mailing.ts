@@ -13,10 +13,12 @@ import { STARTER_TEMPLATES } from '../../services/mailingStarters';
 /**
  * Admin → Mailing: contacts, lists, templates, campaigns, automations, reports. See services/mailing.ts for the rules.
  */
+import { WAITLIST_STATUSES } from './waitlist';
 const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin_manager', 'admin'] as const;
 const audienceSchema = z.object({
   listIds: z.array(z.string().uuid()).default([]), tags: z.array(z.string().trim().min(1).max(40)).default([]), excludeTags: z.array(z.string().trim().min(1).max(40)).default([]),
   source: z.enum(['all', 'app_users', 'contacts']).default('all'), roles: z.array(z.enum(ROLES)).default([]), verification: z.enum(['any', 'verified', 'unverified']).default('any'),
+  waitlist: z.boolean().default(false), waitlistStatuses: z.array(z.enum(WAITLIST_STATUSES)).default([]),
 });
 const optEmail = z.string().trim().email().max(254).nullable().optional().or(z.literal('').transform(() => null));
 const contentSchema = {
@@ -27,7 +29,7 @@ const campaignSchema = z.object({
   name: z.string().trim().min(1).max(120), kind: z.enum(['marketing', 'service']).default('marketing'), audience: audienceSchema.default({}), track: z.boolean().default(true), ...contentSchema,
 });
 const automationSchema = z.object({
-  name: z.string().trim().min(1).max(120), trigger: z.enum(['user_signup', 'contact_added', 'list_joined']), list_id: z.string().uuid().nullable().optional(),
+  name: z.string().trim().min(1).max(120), trigger: z.enum(['user_signup', 'contact_added', 'list_joined', 'waitlist_joined']), list_id: z.string().uuid().nullable().optional(),
   roles: z.array(z.enum(ROLES)).default([]), delay_hours: z.number().int().min(0).max(8760).default(0), kind: z.enum(['marketing', 'service']).default('marketing'),
   ...contentSchema, subject: z.string().trim().min(1).max(200), html: z.string().min(1).max(200_000),
 });
