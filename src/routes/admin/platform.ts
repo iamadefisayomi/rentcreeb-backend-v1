@@ -16,7 +16,7 @@ import { getSettings, setSetting } from '../../services/settings';
 import { iceServers } from '../calls.routes';
 import { PERSON, audit, count, dailySeries, isUuid, like, sumKobo } from './shared';
 
-const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'admin'] as const;
+const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin'] as const;
 const audience = z.object({
   roles: z.array(z.enum(ROLES)).default([]),
   verification: z.enum(['any', 'verified', 'unverified']).default('any'),

@@ -13,7 +13,7 @@ import { presenceOf } from '../../services/presence';
 import { purgeVerificationEvidence } from '../../services/verificationEvidence';
 import { PERSON, audit, count, decision, like, notesFor, sendCsv } from './shared';
 
-const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'admin'] as const;
+const ROLES = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor', 'admin'] as const;
 const USER_COLS = 'id, first_name, last_name, email, phone, role, avatar_url, phone_verified, nin_verified, is_suspended, deleted_at, rating_avg, rating_count, created_at';
 const escHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 

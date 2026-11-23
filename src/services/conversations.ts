@@ -5,7 +5,7 @@ import { logger } from '../lib/logger';
  * The chat between two people about one booking or job, created if it does not exist yet.
  * Select-then-insert (not upsert) so it works both before and after migration 016, which allows several chats per job.
  */
-export async function ensureConversation(contextType: 'booking' | 'job' | 'roommate' | 'property', contextId: string, a: string, b: string): Promise<{ id: string } | null> {
+export async function ensureConversation(contextType: 'booking' | 'job' | 'roommate' | 'property' | 'project', contextId: string, a: string, b: string): Promise<{ id: string } | null> {
   const find = () => db.from('conversations').select('id').eq('context_type', contextType).eq('context_id', contextId)
     .or(`and(participant_a.eq.${a},participant_b.eq.${b}),and(participant_a.eq.${b},participant_b.eq.${a})`).limit(1).maybeSingle();
   const { data: existing } = await find();

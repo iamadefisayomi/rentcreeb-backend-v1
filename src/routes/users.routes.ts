@@ -22,7 +22,7 @@ r.patch('/me', authenticate, async (req, res) => {
   const b = z.object({
     firstName: z.string().min(2).optional(), lastName: z.string().min(2).optional(),
     avatarUrl: z.string().url().nullable().optional(), bio: z.string().max(300).optional(),
-    role: z.enum(['tenant', 'landlord', 'estate_manager', 'artisan', 'agent']).optional(),
+    role: z.enum(['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor']).optional(),
     onboardingCompleted: z.boolean().optional(),
     username: z.string().trim().toLowerCase().regex(/^[a-z0-9._-]{3,30}$/, '3–30 characters: letters, numbers, dots, dashes or underscores').nullable().optional(),
     /** Website: WhatsApp number, social links, professional details, and a phone number that is not verified yet. */
@@ -31,6 +31,9 @@ r.patch('/me', authenticate, async (req, res) => {
     gender: z.enum(['male', 'female', 'other', 'prefer_not_to_say']).nullable().optional(),
     dateOfBirth: z.string().date().nullable().optional(),
     agencyName: optText(120), licenseNumber: optText(60), location: optText(80),
+    /** Investors: what they're looking for (used to rank projects). */
+    investmentPrefs: z.object({ cities: z.array(z.string().trim().max(60)).max(10).default([]), budgetMinKobo: z.number().int().nonnegative().nullable().optional(),
+      budgetMaxKobo: z.number().int().positive().nullable().optional(), goal: z.enum(['capital_growth', 'rental_income', 'own_home', 'land_banking']).nullable().optional() }).nullable().optional(),
   }).parse(req.body);
   if (b.role && req.user.onboarding_completed && b.role !== req.user.role) throw forbidden('Role cannot be changed after onboarding');
   if (b.dateOfBirth && b.dateOfBirth > new Date().toISOString().slice(0, 10)) throw badRequest('Date of birth cannot be in the future');
@@ -50,6 +53,7 @@ r.patch('/me', authenticate, async (req, res) => {
   if (b.dateOfBirth !== undefined) patch.date_of_birth = b.dateOfBirth;
   if (b.agencyName !== undefined) patch.agency_name = b.agencyName || null;
   if (b.licenseNumber !== undefined) patch.license_number = b.licenseNumber || null;
+  if (b.investmentPrefs !== undefined) patch.investment_prefs = b.investmentPrefs;
   if (b.location !== undefined) patch.location = b.location || null;
   if (b.whatsapp !== undefined) patch.whatsapp = b.whatsapp || null;
   if (b.socials) patch.socials = b.socials;

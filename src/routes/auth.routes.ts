@@ -34,7 +34,7 @@ const registerSchema = z.object({
   email: z.string().email('Please enter a valid email').toLowerCase(),
   password: passwordSchema,
   confirmPassword: z.string(),
-  role: z.enum(['tenant', 'landlord', 'estate_manager', 'artisan', 'agent']),
+  role: z.enum(['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor']),
 }).refine((d) => d.password === d.confirmPassword, { path: ['confirmPassword'], message: 'Passwords do not match' });
 
 async function sendPhoneOtp(userId: string, phone: string) {
@@ -235,7 +235,7 @@ r.post('/oauth/finish', async (req, res) => {
   // A login whose profile is missing (e.g. removed by hand) gets a fresh one, as the sign-up trigger would have made.
   let repaired = false;
   if (!existing) {
-    const role = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent'].includes(meta.role) ? meta.role : 'tenant';
+    const role = ['tenant', 'landlord', 'estate_manager', 'artisan', 'agent', 'developer', 'investor'].includes(meta.role) ? meta.role : 'tenant';
     const ins = await db.from('profiles').insert({ id: u.id, email: u.email ?? null, first_name: first, last_name: last, role, avatar_url: meta.avatar_url ?? meta.picture ?? null }).select('*').single();
     if (ins.error) {
       logger.error({ err: ins.error, userId: u.id }, 'oauth: could not recreate missing profile');

@@ -30,6 +30,12 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
   const jIds = out.filter((c) => c.contextType === 'job').map((c) => c.contextId);
   const sIds = out.filter((c) => c.contextType === 'support').map((c) => c.contextId);
   const pIds = out.filter((c) => c.contextType === 'property').map((c) => c.contextId);
+  const dIds = out.filter((c) => c.contextType === 'project').map((c) => c.contextId);
+  if (dIds.length) {
+    const { data: projs } = await db.from('dev_projects').select('id, name, area, city, status, images').in('id', dIds);
+    for (const x of (projs ?? []) as any[]) for (const c of out as any[]) if (c.contextType === 'project' && c.contextId === x.id)
+      c.context = { id: x.id, kind: 'project', status: x.status, title: x.name, area: [x.area, x.city].filter(Boolean).join(', '), propertyId: null, projectId: x.id, date: null, cover: x.images?.[0] ?? null };
+  }
   if (pIds.length) {
     const { data: props } = await db.from('properties').select('id, title, area, slug, property_media(url, position)').in('id', pIds);
     for (const x of (props ?? []) as any[]) {
@@ -50,7 +56,7 @@ async function attachContext(out: { contextType: string; contextId: string }[]) 
   for (const x of (jbs.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'job', status: x.status, title: x.title, area: x.properties?.area ?? null, propertyId: x.properties?.id ?? null, date: null, cover: null, property: x.properties?.title ?? null });
   for (const c of out as any[]) if (c.contextType === 'roommate') ctx.set(c.contextId, { id: c.contextId, kind: 'roommate', status: 'accepted', title: 'Roommate match', area: null, propertyId: null, date: null, cover: null });
   for (const x of (tks.data ?? []) as any[]) ctx.set(x.id, { id: x.id, kind: 'support', status: x.status, title: x.subject, area: x.category, propertyId: null, date: x.created_at, cover: null });
-  for (const c of out as any[]) if (c.contextType !== 'property') c.context = ctx.get(c.contextId) ?? null;
+  for (const c of out as any[]) if (c.contextType !== 'property' && c.contextType !== 'project') c.context = ctx.get(c.contextId) ?? null;
 }
 
 /** Conversations exist only after a booking is confirmed or a job is assigned. */

@@ -42,6 +42,7 @@ import screeningRoutes from './routes/screening.routes';
 import roommatesRoutes from './routes/roommates.routes';
 import billsRoutes from './routes/bills.routes';
 import utilitiesRoutes from './routes/utilities.routes';
+import { developmentsRouter, developerRouter, investorRouter } from './routes/developments.routes';
 
 export function createApp() {
   const app = express();
@@ -110,6 +111,9 @@ export function createApp() {
   v1.use('/screening', screeningRoutes);
   v1.use('/roommates', roommatesRoutes);
   v1.use('/bills', billsRoutes);
+v1.use('/developments', developmentsRouter); // property development projects (developers & investors)
+v1.use('/developer', developerRouter);
+v1.use('/investor', investorRouter);
 v1.use('/utilities', utilitiesRoutes); // airtime, data, electricity, TV, internet, exam PINs (VTpass)
   v1.use('/rentsave', rentsaveRoutes);
   v1.use('/maintenance', maintenanceRoutes);
