@@ -8,6 +8,7 @@ import { processMailQueue } from '../services/mailing';
 import { runSavedSearchAlerts } from '../routes/savedSearches.routes';
 import { markOverdueBills } from '../routes/bills.routes';
 import { requeryProcessing } from '../services/utilities';
+import { runRentReminders } from '../services/rentRules';
 
 /**
  * Housekeeping. If you run multiple API instances, run this on ONE instance
@@ -47,16 +48,10 @@ cron.schedule('*/2 * * * *', () => { void requeryProcessing(); });
     } catch (err) { logger.error({ err }, 'cron: subscriptions/rent failed'); }
   });
 
-  // Daily 8am (Lagos = UTC+1 → 07:00 UTC): rent due in 3 days.
+  // Daily 8am (Lagos = UTC+1 → 07:00 UTC): rent reminders and late fees.
   cron.schedule('0 7 * * *', async () => {
-    try {
-      const d = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
-      const { data } = await db.from('rent_payments').select('amount_kobo, tenancies(tenant_id, id)').eq('status', 'due').eq('due_date', d);
-      for (const rp of (data ?? []) as any[]) {
-        if (!rp.tenancies?.tenant_id) continue; // invited tenant hasn't joined yet
-        await notify(rp.tenancies.tenant_id, 'rent_reminder', 'Rent due in 3 days', `₦${(rp.amount_kobo / 100).toLocaleString()} is due on ${d}.`, { tenancyId: rp.tenancies.id });
-      }
-    } catch (err) { logger.error({ err }, 'cron: rent reminders failed'); }
+    // Each landlord's reminder schedule and late-fee rule (services/rentRules.ts, migration 034).
+    try { await runRentReminders(); } catch (err) { logger.error({ err }, 'cron: rent reminders failed'); }
 
     // Leases whose termination notice has run out end today; their unit becomes vacant.
     try {

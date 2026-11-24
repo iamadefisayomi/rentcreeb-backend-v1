@@ -8,6 +8,8 @@ import { signPrivateUrl } from '../lib/bunny';
 import { authenticate, requireRole } from '../middleware/auth';
 import { notify } from '../services/notify';
 import { contentHash, defaultClauses, type Clause, type LeaseFields } from '../services/leaseTemplate';
+import QRCode from 'qrcode';
+import { issueCertificate, verifyUrl } from './rentRules.routes';
 
 /**
  * Tenancy add-ons (mounted on /tenancies before the main tenancy routes):
@@ -116,6 +118,7 @@ r.get('/rent-payments/:rpId/receipt.pdf', async (req, res) => {
   row(doc, 'Landlord', fullName(t.landlord ?? {}) || '-');
   row(doc, 'Property', `${t.unit_label ? t.unit_label + ', ' : ''}${t.properties?.title ?? ''}, ${t.properties?.address ?? ''}`);
   row(doc, 'Amount', `NGN ${naira(rp.amount_kobo)}`);
+  if (Number((rp as any).late_fee_kobo)) row(doc, '  of which late fee', `NGN ${naira((rp as any).late_fee_kobo)}`);
   row(doc, 'For rent due', new Date(rp.due_date + 'T12:00:00').toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' }) + (rp.instalment_no ? ` (instalment ${rp.instalment_no})` : ''));
   row(doc, 'Paid on', new Date(rp.paid_at ?? rp.created_at).toLocaleString('en-NG'));
   row(doc, 'Method', String(rp.method ?? 'paystack').replace('_', ' ') + (rp.method && rp.method !== 'paystack' && rp.method !== 'rentsave' ? ' (recorded by landlord)' : ''));
@@ -144,10 +147,27 @@ r.get('/history', requireRole('tenant'), async (req, res) => {
 });
 r.get('/history.pdf', requireRole('tenant'), async (req, res) => {
   const history = await historyFor(req.user.id);
+  // Certificate: a code + QR anyone (a bank, an embassy, the next landlord) can check at /verify/<code>.
+  const paidAll = history.reduce((s, h) => s + h.payments.paid, 0);
+  const onTimeAll = history.reduce((s, h) => s + h.payments.onTime, 0);
+  const onTimePct = paidAll ? Math.round((onTimeAll / paidAll) * 100) : null;
+  const code = await issueCertificate(req.user.id, {
+    name: fullName(req.user), ninVerified: !!(req.user as any).nin_verified, onTimePct,
+    tenancies: history.map(({ rentPayments: _rp, ...h }) => h),
+  });
+  const qr = code ? await QRCode.toBuffer(verifyUrl(req, code), { width: 360, margin: 1 }) : null;
   const doc = pdfResponse(res, 'rentcreeb-rental-reference.pdf');
-  doc.fontSize(12).fillColor('#666').text('Rental reference').moveDown(0.6).fillColor('#000');
-  doc.fontSize(11).text(`${fullName(req.user)}${(req.user as any).nin_verified ? '  ·  Identity verified (NIN)' : ''}`).moveDown(0.2);
-  doc.fontSize(9).fillColor('#666').text(`Generated ${new Date().toLocaleString('en-NG')} from records kept on RentCreeb.`).fillColor('#000').moveDown(1);
+  doc.fontSize(12).fillColor('#666').text('Rental history certificate').moveDown(0.6).fillColor('#000');
+  if (qr && code) {
+    doc.image(qr, doc.page.width - 50 - 110, 45, { width: 110 });
+    doc.fontSize(8).fillColor('#666').text(`Verify: ${code}`, doc.page.width - 50 - 130, 158, { width: 150, align: 'center' });
+    doc.x = 50; doc.y = 90;
+  }
+  doc.fontSize(11).fillColor('#000').text(`${fullName(req.user)}${(req.user as any).nin_verified ? '  ·  Identity verified (NIN)' : ''}`).moveDown(0.2);
+  if (onTimePct != null) doc.fontSize(11).text(`On-time rent payments: ${onTimePct}% (${onTimeAll} of ${paidAll})`).moveDown(0.2);
+  doc.fontSize(9).fillColor('#666').text(`Generated ${new Date().toLocaleString('en-NG')} from records kept on RentCreeb.`).moveDown(0.2);
+  if (code) doc.text(`Check this certificate is genuine: scan the QR code or visit ${verifyUrl(req, code)}`, { width: 330 });
+  doc.fillColor('#000').moveDown(1.2);
   if (!history.length) doc.fontSize(11).text('No tenancies recorded on RentCreeb yet.');
   for (const h of history) {
     doc.fontSize(12.5).text(`${h.property ?? 'Property'}${h.unit ? ` (${h.unit})` : ''}`).moveDown(0.15);

@@ -38,6 +38,8 @@ import mailRoutes from './routes/mail.routes';
 import assistantRoutes from './routes/assistant.routes';
 import tenancyExtrasRoutes from './routes/tenancyExtras.routes';
 import savedSearchesRoutes from './routes/savedSearches.routes';
+import { listingTools, sharePages } from './routes/listingTools.routes';
+import { rentRules, verifyPages } from './routes/rentRules.routes';
 import screeningRoutes from './routes/screening.routes';
 import roommatesRoutes from './routes/roommates.routes';
 import billsRoutes from './routes/bills.routes';
@@ -85,6 +87,9 @@ export function createApp() {
   // Before the rate limiter, so a scheduler's pings never get throttled.
   app.use('/api/v1/cron', keepAliveRoutes);
   app.use(general);
+  // Public pages: shared listing links (with QR) and rental-certificate checks.
+  app.use('/p', sharePages);
+  app.use('/verify', verifyPages);
 
   const v1 = express.Router();
   /**
@@ -102,6 +107,8 @@ export function createApp() {
   v1.use('/uploads', uploadsRoutes);
   v1.use('/notifications', notificationsRoutes);
   v1.use('/properties', propertiesRoutes);
+  v1.use('/listings', listingTools);
+  v1.use('/rent-rules', rentRules);
   v1.use('/bookings', bookingsRoutes);
   v1.use('/reviews', reviewsRoutes);
   v1.use('/reports', reportsRoutes);

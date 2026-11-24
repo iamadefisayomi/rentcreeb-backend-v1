@@ -21,7 +21,8 @@ export type NotificationPrefKey = keyof typeof NOTIFICATION_DEFAULTS;
 const TYPE_PREF: Record<string, NotificationPrefKey> = {
   booking_request: 'inspection_confirmations', booking_confirmed: 'inspection_confirmations', inspection_done: 'inspection_confirmations',
   booking_cancelled: 'cancellations',
-  payment_success: 'payment_confirmations', rent_paid: 'payment_confirmations', rent_reminder: 'payment_confirmations',
+  payment_success: 'payment_confirmations', rent_paid: 'payment_confirmations', rent_reminder: 'payment_confirmations', late_fee: 'payment_confirmations',
+  price_drop: 'platform_updates',
   subscription_active: 'payment_confirmations', subscription_expired: 'payment_confirmations',
   rentsave: 'rentsave_deductions',
   payment_released: 'escrow_updates', revision_requested: 'escrow_updates', revision_approved: 'escrow_updates', revision_rejected: 'escrow_updates',
@@ -37,7 +38,7 @@ const TYPE_PREF: Record<string, NotificationPrefKey> = {
 export const NOTIFICATION_CATEGORIES = ['payments', 'bookings', 'maintenance', 'messages', 'reviews', 'account'] as const;
 export type NotificationCategory = typeof NOTIFICATION_CATEGORIES[number];
 const CATEGORY_TYPES: Record<Exclude<NotificationCategory, 'account'>, string[]> = {
-  payments: ['payment_success', 'rent_paid', 'rent_reminder', 'subscription_active', 'subscription_expired', 'rentsave', 'payment_released', 'revision_requested', 'revision_approved', 'revision_rejected'],
+  payments: ['payment_success', 'rent_paid', 'rent_reminder', 'late_fee', 'subscription_active', 'subscription_expired', 'rentsave', 'payment_released', 'revision_requested', 'revision_approved', 'revision_rejected'],
   bookings: ['booking_request', 'booking_confirmed', 'booking_cancelled', 'inspection_done'],
   maintenance: ['maintenance_request', 'maintenance_update', 'maintenance_escalated', 'job_alert', 'new_quote', 'quote_accepted', 'job_started', 'job_complete', 'report_submitted', 'report_approved', 'report_rejected', 'report_countered'],
   messages: ['message', 'incoming_call', 'missed_call'],

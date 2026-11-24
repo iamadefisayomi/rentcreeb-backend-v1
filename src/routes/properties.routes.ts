@@ -11,6 +11,7 @@ import { env } from '../config/env';
 import { responseTime } from '../services/responseTime';
 
 import { ownerListingReport, queueIfPending, queueListingReview } from '../services/listingReview';
+import { alertPriceDrop } from '../services/listingInsights';
 
 const r = Router();
 const LISTER_ROLES = ['agent', 'landlord', 'estate_manager'] as const;
@@ -518,6 +519,7 @@ r.patch('/:id', authenticate, requireRole(...LISTER_ROLES), async (req, res) => 
   if (missingColumn(upd.error)) delete patch.video_urls;
   const saved = unwrap(missingColumn(upd.error) ? await db.from('properties').update(patch).eq('id', existing.id).select().single() : upd);
   if (saved.status === 'pending') queueListingReview(saved.id);
+  if (Number(saved.price_kobo) < Number(existing.price_kobo)) void alertPriceDrop(saved, Number(existing.price_kobo), Number(saved.price_kobo));
   res.json({ property: saved });
 });
 
