@@ -6,7 +6,12 @@ export interface NinSelfieResult {
   match: boolean;
   confidence: number;
   firstName?: string;
+  middleName?: string;
   lastName?: string;
+  /** As NIMC sent it (format varies); normalised by identityMatch.toIsoDate. */
+  dateOfBirth?: string;
+  /** M / F / Male / Female, as NIMC sent it. */
+  gender?: string;
   raw: unknown;
   /** The whole provider response for the admin reviewer, with every picture replaced by a placeholder (pictures are in `images`). */
   response: Record<string, unknown>;
@@ -125,8 +130,11 @@ export async function verifyNinWithSelfie(nin: string, selfieBase64: string): Pr
   return {
     match: fm.status === 'matched',
     confidence: Number(fm.score ?? 0),
-    firstName: record.first_name,
-    lastName: record.last_name,
+    firstName: record.first_name ?? record.firstname,
+    middleName: record.middle_name ?? record.middlename,
+    lastName: record.last_name ?? record.surname ?? record.lastname,
+    dateOfBirth: record.date_of_birth ?? record.dob ?? record.birth_date ?? record.birthdate,
+    gender: record.gender ?? record.sex,
     raw: { face_match: fm, request_id: json.request_id },
     response: (clean ?? {}) as Record<string, unknown>,
     images,

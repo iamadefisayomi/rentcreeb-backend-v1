@@ -41,6 +41,8 @@ const schema = z.object({
   // A "not_matched" scoring at least this high goes to manual review instead of failing (and doesn't use an attempt).
   BYTID_REVIEW_SCORE: z.coerce.number().default(45),
   NIN_MAX_ATTEMPTS: z.coerce.number().default(3),
+  // Combined identity score (face 50 + first 12 + last 12 + middle 6 + date of birth 14 + gender 6) that is approved straight away.
+  NIN_AUTO_APPROVE_SCORE: z.coerce.number().default(65),
 
   PAYSTACK_SECRET_KEY: z.string().min(1),
   PAYSTACK_CALLBACK_URL: z.string().optional(),

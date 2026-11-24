@@ -11,6 +11,8 @@ import { uploadToBunny } from '../lib/bunny';
 import { logger } from '../lib/logger';
 import { authenticate } from '../middleware/auth';
 import { notify } from '../services/notify';
+import { scoreIdentity } from '../lib/identityMatch';
+import { assertNinAvailable, releaseOtherClaims } from '../services/ninClaim';
 
 const r = Router();
 r.use(authenticate);
@@ -84,12 +86,21 @@ r.get('/status', async (req, res) => {
 });
 
 /**
- * multipart/form-data: nin, consent, selfie (image). The selfie is forwarded to Bytid. The selfie, the full response and the
+ * multipart/form-data: nin, consent, selfie (image), and optionally firstName, middleName, lastName, dateOfBirth
+ * (YYYY-MM-DD), gender (male | female).
+ * The typed details are compared with the NIMC record and blended with the face score (lib/identityMatch); a combined
+ * score of NIN_AUTO_APPROVE_SCORE (65) or more is approved straight away, as is a face match Bytid calls "matched". The selfie is forwarded to Bytid. The selfie, the full response and the
  * NIMC ID photo are kept privately for the admin ID verification page. The selfie is deleted once an admin decides or
  * after 30 days; the NIMC card and the NIN response are kept for every outcome (success, review or failure).
  */
 r.post('/nin', upload.single('selfie'), async (req, res) => {
-  const { nin, consent } = z.object({ nin: z.string().regex(/^\d{11}$/, 'NIN must be 11 digits'), consent: boolish }).parse(req.body);
+  const optText = z.string().trim().max(80).optional().transform((v) => v || undefined);
+  const { nin, consent, ...typed } = z.object({
+    nin: z.string().regex(/^\d{11}$/, 'NIN must be 11 digits'), consent: boolish,
+    firstName: optText, middleName: optText, lastName: optText,
+    gender: z.union([z.enum(['male', 'female']), z.literal('')]).optional().transform((v) => v || undefined),
+    dateOfBirth: z.union([z.string().date('Date of birth must be YYYY-MM-DD'), z.literal('')]).optional().transform((v) => v || undefined),
+  }).parse(req.body);
   if (!consent) throw badRequest('Consent is required', 'CONSENT_REQUIRED');
   if (!req.file) throw badRequest('Selfie image is required', 'SELFIE_REQUIRED');
   if (req.user.nin_verified) throw conflict('Already verified', 'ALREADY_VERIFIED');
@@ -99,30 +110,36 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
     throw new HttpError(429, 'Maximum attempts reached', 'VERIFICATION_LOCKED', { suggestions: ['fix_issue', 'contact_support', 'manual_verification'] });
 
   const ninHash = hashNin(nin);
-  const { data: dup } = await db.from('verifications').select('user_id').eq('nin_hash', ninHash).eq('status', 'success').maybeSingle();
-  if (dup && dup.user_id !== req.user.id) throw conflict('This NIN is linked to another account', 'NIN_IN_USE');
+  // Only a NIN held by another VERIFIED account is refused; unverified claims on it are overridden.
+  await assertNinAvailable(ninHash, req.user.id);
 
   const record = { user_id: req.user.id, nin_hash: ninHash, nin_last3: nin.slice(-3) };
   try {
     const result = await verifyNinWithSelfie(nin, req.file.buffer.toString('base64'));
     // The NIMC name is kept so a reviewer can compare it with the name on the account (no other NIN data is stored).
+    const identity = scoreIdentity(result.confidence, typed, result);
     const meta = { face_match: (result.raw as any)?.face_match?.status, request_id: (result.raw as any)?.request_id,
-      nimc_name: [result.firstName, result.lastName].filter(Boolean).join(' ') || undefined };
+      nimc_name: [result.firstName, result.middleName, result.lastName].filter(Boolean).join(' ') || undefined,
+      typed_name: [typed.firstName, typed.middleName, typed.lastName].filter(Boolean).join(' ') || undefined,
+      nimc_gender: result.gender, typed_gender: typed.gender,
+      identity_score: identity.score, identity_breakdown: identity };
     // Evidence for the admin page: the selfie, the full NIN response and the NIMC ID card/photo, saved on every outcome.
     // Private. The NIMC card and response are kept; only the selfie is cleared later (admin decision / 30 days).
     const [selfie_path, nimc_files] = await Promise.all([keepForReview(req.user.id, req.file, 'selfie'), keepNimcImages(req.user.id, result.images)]);
     const evidence = { selfie_path, nimc_record: result.response, nimc_files };
-    if (!result.match || result.confidence < env.BYTID_MIN_CONFIDENCE) {
-      // Close calls (old NIMC photo, poor light) go to a person instead of locking the user out.
-      if (result.confidence >= env.BYTID_REVIEW_SCORE) {
+    const faceOk = result.match && result.confidence >= env.BYTID_MIN_CONFIDENCE;
+    if (!faceOk && identity.score < env.NIN_AUTO_APPROVE_SCORE) {
+      // Close calls (old NIMC photo, poor light, details that match) go to a person instead of locking the user out.
+      if (result.confidence >= env.BYTID_REVIEW_SCORE || identity.score >= env.BYTID_REVIEW_SCORE) {
         await insertVerification({ ...record, status: 'manual_review', confidence: result.confidence, failure_reason: 'FACE_BORDERLINE', metadata: meta, ...evidence });
         return res.status(202).json({ status: 'in_review', message: 'Your selfie was a close match. Our team will review it and confirm by email, usually within 24 hours.' });
       }
       await insertVerification({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH', metadata: meta, ...evidence });
       throw new HttpError(422, 'We could not match your selfie to your NIN record', 'FACE_MISMATCH', { attemptsRemaining: Math.max(0, env.NIN_MAX_ATTEMPTS - used - 1) });
     }
-    await insertVerification({ ...record, status: 'success', confidence: result.confidence, metadata: meta, ...evidence })
+    await insertVerification({ ...record, status: 'success', confidence: result.confidence, metadata: { ...meta, approved_by: faceOk ? 'face_match' : 'identity_score' }, ...evidence })
       .catch((err) => logger.error({ err }, 'could not save the successful NIN check'));
+    await releaseOtherClaims(ninHash, req.user.id).catch((err) => logger.warn({ err }, 'could not override other claims on the NIN'));
     await db.from('profiles').update({ nin_verified: true, updated_at: new Date().toISOString() }).eq('id', req.user.id);
     await notify(req.user.id, 'verified', 'Identity verified ✅', 'You now have full access to RentCreeb.');
     res.json({ status: 'verified', ninLast3: nin.slice(-3) });
@@ -151,10 +168,7 @@ r.post('/manual-request', upload.fields([{ name: 'selfie', maxCount: 1 }, { name
   const doc = files.document?.[0];
   if (doc && !IMAGE.test(doc.mimetype) && doc.mimetype !== 'application/pdf') throw badRequest('The ID document must be a photo or PDF', 'BAD_FILE');
 
-  if (b.nin) {
-    const { data: dup } = await db.from('verifications').select('user_id').eq('nin_hash', hashNin(b.nin)).eq('status', 'success').maybeSingle();
-    if (dup && dup.user_id !== req.user.id) throw conflict('This NIN is linked to another account', 'NIN_IN_USE');
-  }
+  if (b.nin) await assertNinAvailable(hashNin(b.nin), req.user.id);
   const [selfie_path, document_path] = await Promise.all([keepForReview(req.user.id, files.selfie?.[0], 'selfie'), keepForReview(req.user.id, doc, 'document')]);
   const metadata = { note: b.note, requested_at: new Date().toISOString() };
   const { data: open } = await db.from('verifications').select('id, metadata').eq('user_id', req.user.id).eq('status', 'manual_review')

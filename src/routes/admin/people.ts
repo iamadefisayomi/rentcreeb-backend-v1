@@ -11,6 +11,7 @@ import { notify } from '../../services/notify';
 import { closeAccount } from '../../services/accounts';
 import { presenceOf } from '../../services/presence';
 import { purgeVerificationEvidence } from '../../services/verificationEvidence';
+import { assertNinAvailable, releaseOtherClaims } from '../../services/ninClaim';
 import { PERSON, audit, count, decision, like, notesFor, sendCsv } from './shared';
 import { assertFullAdmin } from './access';
 
@@ -78,9 +79,10 @@ async function approveIdentity(req: Request, userId: string, verificationId: str
   } else {
     v = unwrapMaybe(await db.from('verifications').select('*').eq('user_id', userId).eq('status', 'manual_review').order('created_at', { ascending: false }).limit(1).maybeSingle());
   }
-  if (v && !String(v.nin_hash).startsWith('manual:')) {
-    const { data: dup } = await db.from('verifications').select('user_id').eq('nin_hash', v.nin_hash).eq('status', 'success').neq('user_id', userId).maybeSingle();
-    if (dup) throw conflict('This NIN is already linked to another verified account. Investigate before approving.', 'NIN_IN_USE');
+  const realNin = v && !/^(manual|admin):/.test(String(v.nin_hash));
+  if (realNin) {
+    try { await assertNinAvailable(v.nin_hash, userId); }
+    catch (e) { if ((e as any)?.code === 'NIN_IN_USE') throw conflict('This NIN is already linked to another verified account. Investigate before approving.', 'NIN_IN_USE'); throw e; }
   }
   if (v) await updateVerification(v.id, { status: 'success', ...review });
   else {
@@ -90,6 +92,7 @@ async function approveIdentity(req: Request, userId: string, verificationId: str
   // Any other open requests for this user are now moot.
   await db.from('verifications').update({ status: 'failed', failure_reason: 'SUPERSEDED' }).eq('user_id', userId).eq('status', 'manual_review');
   await db.from('profiles').update({ nin_verified: true, updated_at: now }).eq('id', userId);
+  if (realNin) await releaseOtherClaims(v.nin_hash, userId);
   await purgeEvidence(userId);
   await notify(userId, 'verified', 'Identity verified ✅', 'Your account is now fully verified.');
   await emailUser(userId, 'Your RentCreeb identity is verified', 'Good news: our team has verified your identity. You now have full access to RentCreeb.');
