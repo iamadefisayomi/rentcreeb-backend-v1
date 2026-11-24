@@ -14,7 +14,7 @@ const W = { face: 50, firstName: 12, lastName: 12, middleName: 6, dateOfBirth: 1
 /** "M", "Male", "male " -> "m"; anything else -> "". */
 const sex = (g?: string) => { const c = String(g ?? '').trim().toLowerCase()[0]; return c === 'm' || c === 'f' ? c : ''; };
 
-const norm = (s?: string) => (s ?? '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z]/g, '');
+const norm = (s?: string) => (s ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z]/g, '');
 
 function lev(a: string, b: string) {
   const d = Array.from({ length: b.length + 1 }, (_, i) => i);
