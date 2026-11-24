@@ -15,6 +15,6 @@ test('managers cannot touch money, mailing, settings or private chats', () => {
     ['POST', `/users/${id}/wallet-adjust`], ['POST', `/users/${id}/close`], ['POST', `/users/${id}/delete`], ['GET', '/users/export'], ['POST', `/bookings/${id}/cancel`], ['POST', `/bookings/${id}/complete`],
     ['POST', '/subscriptions/grant'], ['PATCH', `/plans/${id}`], ['PUT', '/settings'], ['GET', '/system'], ['POST', '/announcements'], ['GET', '/actions'], ['GET', '/admins'],
     ['GET', '/mailing/overview'], ['POST', `/mailing/campaigns/${id}/send`], ['PUT', '/assistant/settings'], ['GET', `/conversations/${id}/messages`], ['DELETE', `/waitlist/${id}`],
-    ['GET', '/waitlist.csv'], ['DELETE', `/notes/${id}`], ['GET', '/users/x/../../finance']] as const)
+    ['GET', '/waitlist.csv'], ['GET', '/media'], ['POST', '/media'], ['DELETE', '/media'], ['DELETE', `/notes/${id}`], ['GET', '/users/x/../../finance']] as const)
     assert.ok(!managerMay(m, p), `${m} ${p}`);
 });

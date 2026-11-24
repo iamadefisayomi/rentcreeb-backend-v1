@@ -48,3 +48,20 @@ export function signPrivateUrl(path: string, ttlSeconds = 300) {
     .replace(/\n/g, '').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
   return `${env.BUNNY_PRIVATE_CDN_URL}${p}?token=${token}&expires=${expires}`;
 }
+
+export type BunnyObject = { name: string; path: string; url: string; size: number; createdAt: string; isDirectory: boolean };
+/** Files in one folder of the public zone (Bunny Storage directory listing), newest first. */
+export async function listBunny(folder: string): Promise<BunnyObject[]> {
+  if (!env.BUNNY_STORAGE_ZONE || !env.BUNNY_STORAGE_KEY) throw new HttpError(500, 'Bunny storage not configured', 'BUNNY_CONFIG');
+  const res = await fetch(`https://${env.BUNNY_STORAGE_HOST}/${env.BUNNY_STORAGE_ZONE}/${folder.replace(/^\/+|\/+$/g, '')}/`, {
+    headers: { AccessKey: env.BUNNY_STORAGE_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(20_000),
+  }).catch(() => null);
+  if (!res) throw new HttpError(504, 'Storage did not answer. Try again.', 'BUNNY_TIMEOUT');
+  if (res.status === 404) return [];
+  if (!res.ok) throw new HttpError(502, `Could not list files (storage error ${res.status})`, 'BUNNY_LIST');
+  const rows = (await res.json()) as any[];
+  return rows.map((o) => {
+    const path = `${folder.replace(/^\/+|\/+$/g, '')}/${o.ObjectName}`;
+    return { name: String(o.ObjectName), path, url: `${env.BUNNY_CDN_URL}/${path}`, size: Number(o.Length) || 0, createdAt: o.DateCreated ?? o.LastChanged, isDirectory: !!o.IsDirectory };
+  }).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}

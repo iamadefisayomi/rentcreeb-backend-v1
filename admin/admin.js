@@ -197,7 +197,7 @@
     ['Money', [['finance', 'Finance'], ['payments', 'Payments', 'stuckPayments'], ['bookings', 'Bookings'], ['escrow', 'Escrow'], ['withdrawals', 'Withdrawals', 'pendingWithdrawals'], ['subscriptions', 'Subscriptions & plans']]],
     ['Operations', [['tenancies', 'Tenancies'], ['jobs', 'Jobs'], ['rentsave', 'RentSave']]],
     ['Mailing', [['mailing', 'Overview'], ['mail-campaigns', 'Campaigns'], ['mail-automations', 'Automations'], ['mail-contacts', 'Contacts'], ['mail-lists', 'Lists & sign-up form'], ['mail-templates', 'Templates']]],
-    ['Platform', [['assistant', 'AI Assistant'], ['announcements', 'Announcements'], ['audit', 'Audit log']]],
+    ['Platform', [['media', 'Files & images'], ['assistant', 'AI Assistant'], ['announcements', 'Announcements'], ['audit', 'Audit log']]],
   ];
   // Admin managers (role admin_manager) see only these sections; the API enforces the same limits (src/routes/admin/access.ts).
   var MANAGER_SECTIONS = ['overview', 'verifications', 'listings', 'artisans', 'reports', 'scam', 'reviews', 'support', 'feedback', 'users', 'waitlist', 'bookings', 'tenancies', 'jobs', 'rentsave'];
@@ -238,6 +238,8 @@
     announcements: 'M3 11v2a1 1 0 0 0 1 1h3l7 5V5L7 10H4a1 1 0 0 0-1 1zM18 8a5 5 0 0 1 0 8',
     audit: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2',
     assistant: 'M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9zM5 3l.6 1.4L7 5l-1.4.6L5 7l-.6-1.4L3 5l1.4-.6z',
+    media: 'M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21',
+    upload: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12',
     search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3',
     light: 'M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
     dark: 'M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z',
@@ -1687,6 +1689,94 @@
   };
 
   // ═════════ Audit log ═════════
+  // ═════════ Files & images ═════════
+  // Upload images and files to the CDN and copy their public links (emails, website, announcements).
+  function fmtBytes(n) { n = Number(n || 0); return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+  function copyText(text, okMsg) {
+    var done = function () { toast(okMsg || 'Copied'); };
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+    fallback();
+    function fallback() { var t = document.createElement('textarea'); t.value = text; t.style.position = 'fixed'; t.style.opacity = '0'; document.body.appendChild(t); t.select(); try { document.execCommand('copy'); done(); } catch (e) { toast('Copy failed: select the link and copy it', true); } t.remove(); }
+  }
+  /** Multipart upload with the admin token (api() only sends JSON). Retries once after refreshing an expired session. */
+  function uploadFiles(files, onProgress, retried) {
+    return new Promise(function (resolve, reject) {
+      var fd = new FormData(); Array.prototype.forEach.call(files, function (f) { fd.append('files', f, f.name); });
+      var x = new XMLHttpRequest(); x.open('POST', API + '/admin/media');
+      if (session && session.access_token) x.setRequestHeader('Authorization', 'Bearer ' + session.access_token);
+      x.upload.onprogress = function (e) { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+      x.onload = function () {
+        var j = {}; try { j = JSON.parse(x.responseText || '{}'); } catch (e) {}
+        if (x.status === 401 && !retried && session && session.refresh_token) return refreshSession().then(function () { return uploadFiles(files, onProgress, true); }).then(resolve, reject);
+        if (x.status >= 200 && x.status < 300) resolve(j); else reject(new Error((j.error && j.error.message) || ('Upload failed (' + x.status + ')')));
+      };
+      x.onerror = function () { reject(new Error('Upload failed: check your connection')); };
+      x.send(fd);
+    });
+  }
+  var FILE_ICON = { pdf: 'PDF', doc: 'DOC', docx: 'DOC', xls: 'XLS', xlsx: 'XLS', csv: 'CSV', ppt: 'PPT', pptx: 'PPT', txt: 'TXT', zip: 'ZIP', mp3: 'MP3', wav: 'WAV' };
+
+  PAGES.media = function (r) {
+    var filter = r.q.q || '', kind = r.q.kind || '';
+    shell('media', 'Files & images', 'Upload images and files, then copy their link to use in emails, the website or announcements.');
+    var render = function (j) {
+      var all = j.files || [];
+      var shown = all.filter(function (f) { return (!kind || (kind === 'file' ? f.kind !== 'image' : f.kind === kind)) && (!filter || f.name.toLowerCase().indexOf(filter.toLowerCase()) >= 0); });
+      var nImg = all.filter(function (f) { return f.kind === 'image'; }).length;
+      view('<label class="dropzone card" id="drop" tabindex="0"><input type="file" id="media-input" multiple hidden accept="' + esc((j.accepted || []).map(function (e) { return '.' + e; }).join(',')) + '">' +
+          '<div class="drop-ico">' + icon('upload', '') + '</div><b>Drop images or files here, or click to choose</b>' +
+          '<span class="faint">Up to 10 at a time, ' + fmtBytes(j.maxBytes) + ' each · ' + esc((j.accepted || []).join(', ')) + '</span>' +
+          '<div class="progress" id="up-prog" hidden><div></div></div></label>' +
+        '<div id="just-up"></div>' +
+        '<div class="row between" style="margin:18px 0 10px"><div class="row">' + tabs([['', 'All', String(all.length)], ['image', 'Images', String(nImg)], ['file', 'Other files', String(all.length - nImg)]], kind, function (t) { return '/media' + qs({ q: filter, kind: t }); }) + '</div>' +
+          '<form class="row" id="mf"><input class="input" name="q" placeholder="Search by file name" value="' + esc(filter) + '"><button class="btn">Search</button></form></div>' +
+        '<div class="faint" style="margin-bottom:10px">' + num(all.length) + ' files · ' + fmtBytes(j.totalBytes) + ' in total. Links are public: anyone with a link can open the file.</div>' +
+        (shown.length ? '<div class="media-grid">' + shown.map(function (f, i) {
+          var thumb = f.kind === 'image' ? '<img loading="lazy" alt="" src="' + safeUrl(f.url) + '">' : f.kind === 'video' ? '<video preload="metadata" muted src="' + safeUrl(f.url) + '"></video>' : '<span class="file-ext">' + esc(FILE_ICON[f.ext] || String(f.ext || 'FILE').toUpperCase()) + '</span>';
+          return '<div class="media-card card"><a class="media-thumb" href="' + safeUrl(f.url) + '" target="_blank" rel="noopener" title="Open">' + thumb + '</a>' +
+            '<div class="media-body"><div class="media-name" title="' + esc(f.name) + '">' + esc(f.name) + '</div><div class="faint">' + fmtBytes(f.size) + ' · ' + esc(ago(f.createdAt)) + '</div>' +
+            '<div class="url-row"><input class="input sm" readonly value="' + esc(f.url) + '" aria-label="Link"><button class="btn sm primary" data-copy="' + i + '">Copy link</button></div>' +
+            '<div class="row media-acts">' + (f.kind === 'image' ? '<button class="btn sm" data-copyimg="' + i + '">Copy &lt;img&gt;</button>' : '') +
+              '<a class="btn sm" href="' + safeUrl(f.url) + '" target="_blank" rel="noopener">Open</a><button class="btn sm ghost-danger" data-del="' + i + '">Delete</button></div></div></div>';
+        }).join('') + '</div>' : '<div class="card empty">' + (all.length ? 'No files match.' : 'No uploads yet. Drop your first image above.') + '</div>'));
+
+      $$('.url-row input').forEach(function (inp) { inp.onclick = function () { inp.select(); }; });
+      bind('[data-copy]', function (i) { copyText(shown[i].url, 'Link copied'); });
+      bind('[data-copyimg]', function (i) { var f = shown[i]; copyText('<img src="' + f.url + '" alt="' + f.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').replace(/"/g, '') + '" style="max-width:100%;height:auto;border-radius:10px">', 'Image HTML copied'); });
+      bind('[data-del]', function (i) {
+        var f = shown[i];
+        form({ title: 'Delete ' + f.name + '?', body: 'The link stops working everywhere it is used (emails already sent, the website…). This cannot be undone.', confirm: 'Delete file', danger: true }).then(function (v) {
+          if (!v) return;
+          api('/admin/media?path=' + encodeURIComponent(f.path), { method: 'DELETE' }).then(function () { toast('File deleted'); load(); }).catch(function (e) { toast(e.message, true); });
+        });
+      });
+      $('#mf').onsubmit = function (e) { e.preventDefault(); location.hash = '#/media' + qs({ q: e.target.q.value.trim(), kind: kind }); };
+
+      var input = $('#media-input'), drop = $('#drop'), prog = $('#up-prog');
+      var send = function (files) {
+        if (!files || !files.length) return;
+        if (files.length > 10) { toast('Up to 10 files at a time', true); return; }
+        var big = Array.prototype.filter.call(files, function (f) { return f.size > j.maxBytes; });
+        if (big.length) { toast(big[0].name + ' is larger than ' + fmtBytes(j.maxBytes), true); return; }
+        prog.hidden = false; prog.firstChild.style.width = '0%'; drop.classList.add('busy');
+        uploadFiles(files, function (p) { prog.firstChild.style.width = Math.round(p * 100) + '%'; }).then(function (res) {
+          toast(res.files.length === 1 ? 'Uploaded' : res.files.length + ' files uploaded');
+          return load().then(function () {
+            $('#just-up').innerHTML = '<div class="alert ok just-up"><b>Uploaded.</b> ' + res.files.map(function (f, k) { return '<div class="url-row"><span class="grow">' + esc(f.name) + '</span><input class="input sm" readonly value="' + esc(f.url) + '"><button class="btn sm primary" data-newcopy="' + k + '">Copy link</button></div>'; }).join('') + '</div>';
+            bind('[data-newcopy]', function (k) { copyText(res.files[k].url, 'Link copied'); });
+          });
+        }).catch(function (e) { toast(e.message, true); }).then(function () { prog.hidden = true; drop.classList.remove('busy'); });
+      };
+      input.onchange = function () { send(input.files); input.value = ''; };
+      drop.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
+      ['dragenter', 'dragover'].forEach(function (t) { drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('over'); }); });
+      ['dragleave', 'drop'].forEach(function (t) { drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove('over'); }); });
+      drop.addEventListener('drop', function (e) { send(e.dataTransfer && e.dataTransfer.files); });
+    };
+    var load = function () { return api('/admin/media').then(render).catch(fail); };
+    load();
+  };
+
   PAGES.audit = function (r) {
     var page = Number(r.q.page || 1);
     shell('audit', 'Audit log', 'Every admin action, newest first.');

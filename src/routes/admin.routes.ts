@@ -8,6 +8,7 @@ import { mountMailing } from './admin/mailing';
 import { mountAssistant } from './admin/assistant';
 import { mountWaitlist } from './admin/waitlist';
 import { mountScam } from './admin/scam';
+import { mountMedia } from './admin/media';
 import { ADMIN_ROLES, limitManagers } from './admin/access';
 
 /**
@@ -21,6 +22,7 @@ import { ADMIN_ROLES, limitManagers } from './admin/access';
  *   mailing:  contacts, lists, templates, campaigns, automations (see services/mailing.ts)
  *   waitlist: website waitlist sign-ups (mailing contacts tagged "waitlist")
  *   scam:     scam alerts raised in chats (services/scamGuard.ts)
+ *   media:    uploaded images and files with public links (Files & images)
  *   money:    finance, payments, bookings, escrow, withdrawals, subscriptions & plans, tenancies, RentSave, jobs
  */
 const r = Router();
@@ -35,5 +37,6 @@ mountMailing(r);
 mountAssistant(r);
 mountWaitlist(r);
 mountScam(r);
+mountMedia(r);
 
 export default r;
