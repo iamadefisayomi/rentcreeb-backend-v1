@@ -203,11 +203,19 @@ r.post('/social', async (req, res) => {
  */
 // Only the app may receive the code: Expo Go (exp://…) in development, the app scheme in builds.
 const APP_REDIRECT = /^(exp|exps):\/\/[^\s]+$|^rentcreeb:\/\/[^\s]*$/;
+/** The admin dashboard served by this API (/admin on this host, or on API_PUBLIC_URL): Google sign-in for admins. */
+const isAdminPage = (u: string, req: import('express').Request) => {
+  try {
+    const url = new URL(u);
+    const own = [`${req.protocol}://${req.get('host')}`, env.API_PUBLIC_URL].filter(Boolean).map((o) => new URL(o!).origin);
+    return own.includes(url.origin) && /^\/admin\/?$/.test(url.pathname);
+  } catch { return false; }
+};
 
 r.post('/oauth/start', async (req, res) => {
   const b = z.object({
     provider: z.enum(['google', 'facebook']), // facebook: enable the provider in Supabase Auth first
-    redirectTo: z.string().max(500).refine((u) => APP_REDIRECT.test(u) || isWebUrl(u), 'Unsupported redirect'),
+    redirectTo: z.string().max(500).refine((u) => APP_REDIRECT.test(u) || isWebUrl(u) || isAdminPage(u, req), 'Unsupported redirect'),
     codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43,128}$/),
   }).parse(req.body);
   const url = new URL(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/authorize`);
@@ -219,7 +227,7 @@ r.post('/oauth/start', async (req, res) => {
 });
 
 r.post('/oauth/finish', async (req, res) => {
-  const b = z.object({ code: z.string().min(10).max(500), codeVerifier: z.string().regex(/^[A-Za-z0-9_~.-]{43,128}$/), source: z.enum(["app", "website"]).optional() }).parse(req.body);
+  const b = z.object({ code: z.string().min(10).max(500), codeVerifier: z.string().regex(/^[A-Za-z0-9_~.-]{43,128}$/), source: z.enum(["app", "website", "admin"]).optional() }).parse(req.body);
   const r1 = await fetch(`${env.SUPABASE_URL.replace(/\/$/, '')}/auth/v1/token?grant_type=pkce`, {
     method: 'POST', headers: { apikey: env.SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({ auth_code: b.code, code_verifier: b.codeVerifier }),
@@ -227,6 +235,23 @@ r.post('/oauth/finish', async (req, res) => {
   const session: any = await r1.json().catch(() => null);
   if (!r1.ok || !session?.access_token || !session?.user) throw unauthorized('Google sign-in could not be completed. Please try again.');
   const u = session.user;
+  // Admin dashboard: only a Google email whose account has an admin role in the database gets in. Nothing is created or
+  // changed for anyone else, their session is revoked at once, and the page sends them to the website (details.redirect).
+  // Google links to the admin's existing account when the email is the same.
+  if (b.source === 'admin') {
+    const { data: admin } = await db.from('profiles').select('*').eq('id', u.id).maybeSingle();
+    const sameEmail = !!u.email && !!admin?.email && String(admin.email).toLowerCase() === String(u.email).toLowerCase();
+    if (!admin || !sameEmail || !['admin', 'admin_manager'].includes(admin.role) || admin.is_suspended) {
+      await db.auth.admin.signOut(session.access_token, 'global').catch(() => {});
+      logger.warn({ userId: u.id, email: u.email }, 'admin google sign-in refused: not an admin');
+      throw new HttpError(403, `${u.email ?? 'This Google account'} is not a RentCreeb admin.`, 'NOT_ADMIN', { redirect: env.WEB_BASE_URL });
+    }
+    return res.json({
+      profile: admin,
+      session: { access_token: session.access_token, refresh_token: session.refresh_token, expires_in: session.expires_in, expires_at: session.expires_at, token_type: session.token_type },
+      isNewUser: false,
+    });
+  }
   // The signup trigger reads first/last name from metadata; Google sends given/family/full name instead.
   const meta = u.user_metadata ?? {};
   const full = String(meta.full_name ?? meta.name ?? '').trim();

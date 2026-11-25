@@ -63,7 +63,7 @@
         }
         if (res.status === 204) return null;
         return res.json().catch(function () { return {}; }).then(function (j) {
-          if (!res.ok) { var e = new Error((j.error && j.error.message) || ('Request failed (' + res.status + ')')); e.status = res.status; e.code = j.error && j.error.code; throw e; }
+          if (!res.ok) { var e = new Error((j.error && j.error.message) || ('Request failed (' + res.status + ')')); e.status = res.status; e.code = j.error && j.error.code; e.redirect = j.error && j.error.details && j.error.details.redirect; throw e; }
           return j;
         });
       });
@@ -436,7 +436,7 @@
     if (!session) return renderLogin();
     if (!me) return api('/users/me').then(function (r) {
       var p = r.profile || r.user || r;
-      if (!p || !isAdminRole(p.role)) { logout('This account is not an admin.'); return; }
+      if (!p || !isAdminRole(p.role)) { toSite(null, p && p.email); return; }
       me = p; refreshCounts().catch(function () {}).then(route);
     }).catch(function () { logout(); });
     var r = parse(); var s = r.path[0] || 'overview';
@@ -447,26 +447,64 @@
   window.addEventListener('hashchange', route);
   function logout(msg) { save(null); me = null; renderLogin(msg); }
 
-  // ───────── login ─────────
-  function renderLogin(msg) {
+  // ───────── login (Google) ─────────
+  // Google through Supabase OAuth with PKCE: the verifier stays in this tab, Supabase sends Google back to this page with
+  // ?code=…, and POST /auth/oauth/finish (source "admin") swaps it for a session — only for existing admin accounts.
+  // Supabase must list this page (…/admin/) under Auth → URL Configuration → Redirect URLs.
+  var PKCE_KEY = 'rc_admin_pkce';
+  var SITE = 'https://rentcreeb.com';
+  /** Not an admin: no dashboard at all — clear any session and send them to the main website. */
+  function toSite(url, who) {
+    save(null); me = null;
+    $('#app').innerHTML = '<div class="login"><div class="login-pane" style="grid-column:1/-1"><div class="card"><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo">' +
+      '<h1 style="margin-top:8px">Admins only</h1><p class="muted" style="margin:0">' + esc((who ? who + ' is' : 'This account is') + ' not a RentCreeb admin. Taking you to rentcreeb.com…') + '</p></div></div></div>';
+    setTimeout(function () { location.replace(/^https:\/\//.test(url || '') ? url : SITE); }, 1500);
+  }
+  function b64url(bytes) { var s = ''; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function adminPageUrl() { return location.origin + location.pathname.replace(/\/?$/, '/'); }
+  function startGoogle() {
+    if (!window.crypto || !crypto.subtle) return Promise.reject(new Error('Google sign-in needs a secure (https) connection.'));
+    var verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)).then(function (hash) {
+      sessionStorage.setItem(PKCE_KEY, JSON.stringify({ verifier: verifier, hash: location.hash || '' }));
+      return api('/auth/oauth/start', { method: 'POST', body: { provider: 'google', redirectTo: adminPageUrl(), codeChallenge: b64url(new Uint8Array(hash)) } });
+    }).then(function (r) { location.assign(r.url); });
+  }
+  /** Back from Google: finish the sign-in. Returns true when this load was a Google return (handled here). */
+  function finishGoogle() {
+    var q = new URLSearchParams(location.search);
+    var code = q.get('code'), oauthErr = q.get('error_description') || q.get('error');
+    if (!code && !oauthErr) return false;
+    var saved = null; try { saved = JSON.parse(sessionStorage.getItem(PKCE_KEY) || 'null'); } catch (e) {}
+    sessionStorage.removeItem(PKCE_KEY);
+    history.replaceState(null, '', location.pathname + ((saved && saved.hash) || location.hash || ''));
+    if (oauthErr) { renderLogin('Google sign-in was cancelled or failed: ' + oauthErr); return true; }
+    if (!saved || !saved.verifier) { renderLogin('That sign-in link has expired. Try again.'); return true; }
+    renderLogin(null, true);
+    api('/auth/oauth/finish', { method: 'POST', body: { code: code, codeVerifier: saved.verifier, source: 'admin' } }).then(function (r) {
+      if (!r.profile || !isAdminRole(r.profile.role)) { toSite(null, r.profile && r.profile.email); return; }
+      save(r.session); me = r.profile;
+      refreshCounts().catch(function () {}).then(function () { if (!location.hash || location.hash === '#/') location.hash = '#/overview'; else route(); });
+    }).catch(function (err) {
+      if (err.code === 'NOT_ADMIN') { toSite(err.redirect, (err.message || '').replace(/ is not a RentCreeb admin\.$/, '')); return; }
+      renderLogin(err.message || 'Google sign-in failed. Try again.');
+    });
+    return true;
+  }
+  var GOOGLE_G = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+  function renderLogin(msg, busy) {
     var point = function (t) { return '<li>' + icon('check', '') + esc(t) + '</li>'; };
     $('#app').innerHTML = '<div class="login"><section class="login-art" aria-hidden="true"><img src="logo-white.svg" alt="" height="26" style="position:relative;z-index:1">' +
       '<div><h2>Run RentCreeb from one place.</h2><p>Review listings and ID checks, answer support, move money safely and talk to your users.</p>' +
       '<ul>' + point('Review queues with everything you need to decide') + point('Support conversations in real time') + point('Finance, escrow and payouts at a glance') + point('Campaigns, automations and mailing lists') + '</ul></div>' +
       '<div class="foot">Admins only · every action is recorded in the audit log</div></section>' +
-      '<div class="login-pane"><form class="card" id="login"><div><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo"><h1 style="margin-top:18px">Welcome back</h1><p class="muted" style="margin:6px 0 0">Sign in with your admin account.</p></div>' +
+      '<div class="login-pane"><div class="card" id="login"><div><img src="logo.svg" alt="RentCreeb" height="28" class="login-logo"><h1 style="margin-top:18px">Welcome back</h1><p class="muted" style="margin:6px 0 0">Sign in with the Google account that uses your admin email.</p></div>' +
       (msg ? '<div class="err">' + esc(msg) + '</div>' : '') +
-      '<label>Email<input class="input" name="email" type="email" autocomplete="username" placeholder="you@rentcreeb.com" required></label>' +
-      '<label>Password<input class="input" name="password" type="password" autocomplete="current-password" required></label>' +
-      '<button class="btn primary" type="submit">Sign in</button></form></div></div>';
-    $('#login').onsubmit = function (e) {
-      e.preventDefault();
-      var f = e.target; var btn = f.querySelector('button'); btn.disabled = true; btn.textContent = 'Signing in…';
-      api('/auth/login', { method: 'POST', body: { identifier: f.email.value.trim(), password: f.password.value } }).then(function (r) {
-        if (!r.profile || !isAdminRole(r.profile.role)) { renderLogin('This account is not an admin.'); return; }
-        save(r.session); me = r.profile;
-        refreshCounts().catch(function () {}).then(function () { if (!location.hash || location.hash === '#/') location.hash = '#/overview'; else route(); });
-      }).catch(function (err) { renderLogin(err.status === 401 ? 'Wrong email or password.' : err.message); });
+      '<button class="btn google" type="button" id="g-login"' + (busy ? ' disabled' : '') + '>' + GOOGLE_G + '<span>' + (busy ? 'Signing you in…' : 'Continue with Google') + '</span></button>' +
+      '<p class="faint" style="margin:0;font-size:12.5px">Only RentCreeb admin accounts can sign in. Other Google accounts are turned away and nothing is created for them.</p></div></div></div>';
+    $('#g-login').onclick = function () {
+      var btn = this; btn.disabled = true; btn.querySelector('span').textContent = 'Opening Google…';
+      startGoogle().catch(function (err) { renderLogin(err.message || 'Could not start Google sign-in.'); });
     };
   }
 
@@ -2439,5 +2477,5 @@
     }).catch(function () {});
   }, 60000);
 
-  route();
+  if (!finishGoogle()) route();
 })();

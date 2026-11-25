@@ -533,3 +533,8 @@ a.feed-row:hover { background: var(--card-2); }
 .url-row .input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; }
 .url-row .grow { flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .media-acts { gap: 6px; }
+
+/* Google sign-in button (admin login) */
+.login .btn.google { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 11px 14px; font-size: 14px; font-weight: 600; background: var(--card); color: var(--text); border: 1px solid var(--border); }
+.login .btn.google:hover:not(:disabled) { background: var(--bg); }
+.login .btn.google:disabled { opacity: .7; cursor: default; }
