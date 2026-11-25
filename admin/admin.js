@@ -513,7 +513,7 @@
       return '<div class="funnel-step"><div class="funnel-bar" style="width:' + Math.max(p, 3) + '%"></div><div class="funnel-txt"><span>' + esc(s[0]) + '</span><span class="num"><b>' + num(s[1]) + '</b> <span class="faint">' + (i ? p + '%' : '') + '</span></span></div></div>';
     }).join('') + '</div>';
   }
-  var PURPOSE = { inspection: 'Inspection fees', subscription: 'Subscriptions', rent: 'Rent', rentsave: 'RentSave', job_escrow: 'Job payments', job_topup: 'Job top-ups', bill: 'Bills', utility: 'Utilities', wallet_topup: 'Wallet top-ups' };
+  var PURPOSE = { inspection: 'Inspection fees', subscription: 'Subscriptions', rent: 'Rent', rentsave: 'RentSave', job_escrow: 'Job payments', job_topup: 'Job top-ups', bill: 'Bills', utility: 'Utilities', wallet_topup: 'Wallet top-ups', nin_verification: 'NIN checks' };
   var ROLE_NAMES = { tenant: 'Tenants', landlord: 'Landlords', estate_manager: 'Estate managers', agent: 'Agents', artisan: 'Artisans', developer: 'Developers', investor: 'Investors', admin: 'Admins', admin_manager: 'Admin managers' };
   var LISTING_STATUS = { approved: ['Live', 'ok'], pending: ['Awaiting approval', 'warn'], rejected: ['Rejected', 'bad'], rented: ['Rented', 'violet'], archived: ['Archived', 'grey'], unlisted: ['Unlisted', 'grey'] };
 
@@ -704,14 +704,15 @@
         section('Evidence', '<div class="evidence">' + fig(e.selfieUrl, 'Selfie', v.confidence != null ? 'face score ' + Math.round(v.confidence) + '%' : '') +
           nimcImgs.map(function (x, i) { return fig(x.url, i === 0 && !/signature/i.test(x.field) ? 'NIMC ID photo' : /signature/i.test(x.field) ? 'NIMC signature' : 'NIMC picture', 'from the NIN check · ' + x.field); }).join('') +
           (e.documentUrl || !nimcImgs.length ? fig(e.documentUrl, DOC[e.documentType] || 'ID document', '', e.documentIsPdf) : '') +
-          (safeUrl(u.avatar_url) ? fig(u.avatar_url, 'Profile photo', 'on the account') : '') + '</div><div class="faint">Photos open full size in a new tab. Links expire after 10 minutes. The selfie is deleted once you decide; the NIMC card and NIN response are kept on file.</div>') +
+          (safeUrl(u.avatar_url) ? fig(u.avatar_url, 'Profile photo', 'on the account') : '') + '</div><div class="faint">Photos open full size in a new tab. Links expire after 10 minutes. The selfie, NIMC photo and NIN response from a NIN check are kept on file; ID documents sent for manual review are deleted once you decide.</div>') +
         '<div class="stack">' + section('Does it match the account?',
           '<div class="compare"><div><div class="label">Name on the account</div><div class="value">' + name(u) + '</div></div><div><div class="label">Name on the NIMC record</div><div class="value">' + (meta.nimc_name ? esc(meta.nimc_name) : '<span class="faint">not available</span>') + '</div></div></div>' +
           '<div class="row">' + matchBadge + reasonBadge(v) + statusBadge(v.status) + '</div>' +
           kv([['Face score', v.confidence != null ? Math.round(v.confidence) + '%' : '—'], ['NIN', '••••••••' + esc(v.nin_last3)], ['Date of birth', esc(u.date_of_birth ? day(u.date_of_birth) : '')],
             ['Phone', esc(u.phone || '') + (u.phone_verified ? ' ' + badge('verified', 'ok') : '')], ['Email', esc(u.email || '')], ['Role', label(u.role)], ['Joined', when(u.created_at)],
             ['Their note', meta.note ? '“' + esc(meta.note) + '”' : ''], ['Bytid request', meta.request_id ? '<span class="faint">' + esc(meta.request_id) + '</span>' : ''],
-            ['Attempts used', esc(j.attempts.used + ' of ' + j.attempts.max)], v.review_note ? ['Review note', esc(v.review_note)] : null, v.reviewed_at ? ['Reviewed', when(v.reviewed_at)] : null]) +
+            ['Paid for this check', j.payment ? esc(naira(j.payment.amount_kobo)) + ' ' + statusBadge(j.payment.status) + ' <span class="faint">' + esc(j.payment.reference) + (j.payment.paid_at ? ' · ' + when(j.payment.paid_at) : '') + '</span>' : ''],
+            ['Attempts used', esc(j.attempts.paid ? String(j.attempts.used) + ' (paid checks, no limit)' : j.attempts.used + ' of ' + j.attempts.max)], v.review_note ? ['Review note', esc(v.review_note)] : null, v.reviewed_at ? ['Reviewed', when(v.reviewed_at)] : null]) +
           '<div class="row"><a class="btn sm" href="#/users/' + esc(u.id) + '">Open account →</a></div>') +
         section('Decision', open ? '<p class="muted" style="margin:0">Approve only if the selfie is clearly the same person as the ID photo, and the names agree.</p><div class="row"><button class="btn ok" id="v-ok">Approve: verify identity</button><button class="btn ghost-danger" id="v-no">Reject</button></div>'
           : '<div class="row">' + statusBadge(v.status) + '<span class="muted">This check is closed.</span>' + (!u.nin_verified ? '<button class="btn sm" id="v-reset">Reset attempts so they can retry</button>' : '') + '</div>') + '</div></div>' +

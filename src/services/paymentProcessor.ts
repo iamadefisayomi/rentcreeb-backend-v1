@@ -42,6 +42,8 @@ export async function confirmPayment(reference: string) {
 
   const handlers: Record<string, (p: any) => Promise<void>> = {
     inspection: onInspection, subscription: onSubscription, rent: onRent, rentsave: onRentSave, job_escrow: onJobEscrow, job_topup: onJobTopup, bill: settleBillPayment, utility: onUtilityPayment, wallet_topup: onWalletTopup,
+    // Nothing to settle: the paid row itself is the credit that POST /verification/nin claims (see used_at, migration 035).
+    nin_verification: async () => {},
   };
   try { await handlers[payment.purpose](payment); }
   catch (err) { logger.error({ err, reference }, 'post-payment handler failed'); }

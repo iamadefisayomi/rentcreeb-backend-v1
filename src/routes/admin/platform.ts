@@ -160,6 +160,7 @@ export function mountPlatform(r: Router) {
           ['020 assistant & live agents', probe('assistant_conversations')],
           ['023 website (slugs, legacy ids)', probe('properties', 'legacy_id')],
           ['024 scam alerts', probe('scam_alerts')],
+          ['035 paid NIN checks', probe('verifications', 'payment_id')],
         ];
         return Promise.all(checks.map(async ([name, p]) => ({ name, applied: await p })));
       })(),

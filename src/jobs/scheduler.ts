@@ -65,8 +65,8 @@ cron.schedule('*/2 * * * *', () => { void requeryProcessing(); });
       }
     } catch (err) { logger.error({ err }, 'cron: lease terminations failed'); }
 
-    // Selfies and uploaded ID documents kept for admin review are deleted 30 days after the check, unless still being
-    // reviewed. The NIMC card and NIN response are kept (see purgeVerificationEvidence).
+    // Uploaded ID documents (and selfies sent with a manual review request) are deleted 30 days after the check, unless
+    // still being reviewed. NIN checks (Bytid response, NIMC photo and the selfie sent with it) are kept (see purgeVerificationEvidence).
     try {
       const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
       await purgeVerificationEvidence((q) => q.neq('status', 'manual_review').lt('created_at', cutoff));

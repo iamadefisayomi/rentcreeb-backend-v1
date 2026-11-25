@@ -43,6 +43,10 @@ const schema = z.object({
   NIN_MAX_ATTEMPTS: z.coerce.number().default(3),
   // Combined identity score (face 50 + first 12 + last 12 + middle 6 + date of birth 14 + gender 6) that is approved straight away.
   NIN_AUTO_APPROVE_SCORE: z.coerce.number().default(65),
+  // Price of one automatic NIN + selfie check, in naira, paid by the user through Paystack. 0 = free (the old behaviour,
+  // capped by NIN_MAX_ATTEMPTS). When set, every check is paid for and the attempt cap no longer applies; a failed check
+  // can be paid for again, or the user can request a (free) manual review. Needs migration 035.
+  NIN_VERIFICATION_FEE: z.coerce.number().min(0).default(0),
 
   PAYSTACK_SECRET_KEY: z.string().min(1),
   PAYSTACK_CALLBACK_URL: z.string().optional(),

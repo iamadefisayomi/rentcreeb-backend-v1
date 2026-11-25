@@ -56,7 +56,7 @@ async function updateVerification(id: string, patch: Record<string, unknown>, gu
   return r.data as any;
 }
 
-/** Delete the selfies / uploaded ID documents for a user once a decision is made. The NIMC card and NIN response stay. */
+/** Delete uploaded ID documents (and manual-request selfies) for a user once a decision is made. NIN checks (response, NIMC photo, selfie) stay. */
 async function purgeEvidence(userId: string) {
   await purgeVerificationEvidence((q) => q.eq('user_id', userId));
 }
@@ -377,8 +377,12 @@ export function mountPeople(r: Router) {
     };
     if (v.selfie_path || v.document_path || nimcFiles.length || v.nimc_record) await audit(req, 'verification.view_evidence', 'verification', id, { userId: v.user_id });
     const used = (history ?? []).filter((h: any) => h.status === 'failed' && h.counts_as_attempt !== false).length;
+    // The payment for this check, when NIN checks are paid for (NIN_VERIFICATION_FEE, migration 035).
+    const { data: payment } = v.payment_id
+      ? await db.from('payments').select('reference, amount_kobo, status, channel, paid_at').eq('id', v.payment_id).maybeSingle()
+      : { data: null };
     const { nin_hash: _h, selfie_path: _s, document_path: _d, nimc_files: _nf, nimc_record: _nr, ...safe } = v as any;
-    res.json({ verification: safe, user, history: history ?? [], evidence, sameNinOtherAccounts: (dup as any).data ?? [], attempts: { used, max: env.NIN_MAX_ATTEMPTS } });
+    res.json({ verification: safe, user, history: history ?? [], evidence, payment, sameNinOtherAccounts: (dup as any).data ?? [], attempts: { used, max: env.NIN_MAX_ATTEMPTS, paid: env.NIN_VERIFICATION_FEE > 0 } });
   });
 
   r.post('/verifications/:id/approve', async (req, res) => {

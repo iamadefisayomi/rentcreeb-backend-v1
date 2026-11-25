@@ -13,11 +13,41 @@ import { authenticate } from '../middleware/auth';
 import { notify } from '../services/notify';
 import { scoreIdentity } from '../lib/identityMatch';
 import { assertNinAvailable, releaseOtherClaims } from '../services/ninClaim';
+import { createPayment } from '../services/payments';
 
 const r = Router();
 r.use(authenticate);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024 } });
 const hashNin = (nin: string) => createHash('sha256').update(nin + env.OTP_PEPPER).digest('hex');
+
+// ───────── Paid checks (NIN_VERIFICATION_FEE, migration 035) ─────────
+/** Price of one automatic check in kobo; 0 = checks are free (and capped by NIN_MAX_ATTEMPTS instead). */
+const feeKobo = () => Math.round(env.NIN_VERIFICATION_FEE * 100);
+const paidChecksMissing = () => new HttpError(503, 'Paid verification is not set up yet. Request a manual review instead.', 'VERIFICATION_PROVIDER_ERROR');
+
+/** Paid-for checks the user has not used yet. */
+async function unusedCredits(userId: string) {
+  const { count, error } = await db.from('payments').select('id', { count: 'exact', head: true })
+    .eq('user_id', userId).eq('purpose', 'nin_verification').eq('status', 'success').is('used_at', null);
+  if (error) { logger.error({ err: error.message }, 'NIN credits: run backend/supabase/migrations/035_paid_nin_verification.sql'); return 0; }
+  return count ?? 0;
+}
+
+/** Take one paid check (oldest first). Compare-and-set on used_at, so one payment can never pay for two checks. */
+async function claimCredit(userId: string): Promise<string | null> {
+  for (let i = 0; i < 3; i++) {
+    const { data, error } = await db.from('payments').select('id').eq('user_id', userId).eq('purpose', 'nin_verification')
+      .eq('status', 'success').is('used_at', null).order('paid_at', { ascending: true }).limit(1).maybeSingle();
+    if (error) { logger.error({ err: error.message }, 'NIN credits: run migration 035'); throw paidChecksMissing(); }
+    if (!data) return null;
+    const { data: won } = await db.from('payments').update({ used_at: new Date().toISOString() }).eq('id', data.id).is('used_at', null).select('id').maybeSingle();
+    if (won) return won.id as string;
+  }
+  return null;
+}
+/** Give a paid check back when it didn't run through no fault of the user (provider down, unreadable selfie …). */
+const releaseCredit = (paymentId: string | null) =>
+  paymentId ? db.from('payments').update({ used_at: null }).eq('id', paymentId).then(({ error }) => { if (error) logger.error({ err: error.message, paymentId }, 'could not give a NIN check credit back'); }) : Promise.resolve();
 
 /** Failed tries that still count toward the limit (an admin can reset them: counts_as_attempt = false, migration 013). */
 async function failedAttempts(userId: string) {
@@ -36,6 +66,11 @@ async function insertVerification(row: Record<string, unknown>) {
     // Migration 017 not applied: the NIMC card and NIN response are LOST for this check. Saved anyway without them.
     logger.error({ err: error.message }, 'NIMC card/response NOT saved: run backend/supabase/migrations/017_nimc_response.sql in Supabase');
     const { nimc_record: _r, nimc_files: _f, ...rest } = row;
+    return insertVerification(rest);
+  }
+  if (/payment_id/i.test(error.message) && 'payment_id' in row) {
+    logger.error({ err: error.message }, 'verifications.payment_id missing: run backend/supabase/migrations/035_paid_nin_verification.sql');
+    const { payment_id: _p, ...rest } = row;
     return insertVerification(rest);
   }
   if (/selfie_path|document_path|document_type|column/i.test(error.message)) {
@@ -77,12 +112,29 @@ async function keepForReview(userId: string, file: Express.Multer.File | undefin
 r.get('/status', async (req, res) => {
   const used = await failedAttempts(req.user.id);
   const { count: inReview } = await db.from('verifications').select('id', { count: 'exact', head: true }).eq('user_id', req.user.id).eq('status', 'manual_review');
+  const fee = feeKobo();
   res.json({
     status: req.user.verification_status,
     inReview: (inReview ?? 0) > 0,
     access: { unverified: 'browse_only', partially_verified: 'limited_actions', verified: 'full_access' }[req.user.verification_status],
-    attemptsUsed: used, attemptsRemaining: Math.max(0, env.NIN_MAX_ATTEMPTS - used),
+    // With a fee, every check is paid for, so there is no attempt cap.
+    attemptsUsed: used, attemptsRemaining: fee ? null : Math.max(0, env.NIN_MAX_ATTEMPTS - used),
+    // feeKobo 0 = free. paidChecks = checks paid for but not used yet (a check the provider couldn't run is given back).
+    fee: { feeKobo: fee, paidChecks: fee ? await unusedCredits(req.user.id) : 0 },
   });
+});
+
+/**
+ * Pay for one automatic NIN check (Paystack). Returns { payment } to open in the checkout, or { alreadyPaid: true }
+ * when an unused paid check is waiting, so nobody pays twice.
+ */
+r.post('/nin/pay', async (req, res) => {
+  const fee = feeKobo();
+  if (!fee) throw badRequest('NIN verification is free', 'NO_FEE');
+  if (req.user.nin_verified) throw conflict('Already verified', 'ALREADY_VERIFIED');
+  if (await unusedCredits(req.user.id)) return res.json({ alreadyPaid: true });
+  const payment = await createPayment(req.user, 'nin_verification', fee);
+  res.status(201).json({ payment });
 });
 
 /**
@@ -90,8 +142,10 @@ r.get('/status', async (req, res) => {
  * (YYYY-MM-DD), gender (male | female).
  * The typed details are compared with the NIMC record and blended with the face score (lib/identityMatch); a combined
  * score of NIN_AUTO_APPROVE_SCORE (65) or more is approved straight away, as is a face match Bytid calls "matched". The selfie is forwarded to Bytid. The selfie, the full response and the
- * NIMC ID photo are kept privately for the admin ID verification page. The selfie is deleted once an admin decides or
- * after 30 days; the NIMC card and the NIN response are kept for every outcome (success, review or failure).
+ * NIMC ID photo are kept privately for the admin ID verification page, for every outcome (success, review or failure),
+ * and are not cleared by the 30-day clean-up (see purgeVerificationEvidence).
+ * With NIN_VERIFICATION_FEE set, each check needs a paid check from POST /nin/pay (402 PAYMENT_REQUIRED otherwise).
+ * A completed check (verified, in review, face mismatch, NIN not found) uses it; anything the provider couldn't run gives it back.
  */
 r.post('/nin', upload.single('selfie'), async (req, res) => {
   const optText = z.string().trim().max(80).optional().transform((v) => v || undefined);
@@ -105,15 +159,24 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
   if (!req.file) throw badRequest('Selfie image is required', 'SELFIE_REQUIRED');
   if (req.user.nin_verified) throw conflict('Already verified', 'ALREADY_VERIFIED');
 
+  const fee = feeKobo();
   const used = await failedAttempts(req.user.id);
-  if (used >= env.NIN_MAX_ATTEMPTS)
+  // Free checks are capped; paid checks are not (each one is paid for).
+  if (!fee && used >= env.NIN_MAX_ATTEMPTS)
     throw new HttpError(429, 'Maximum attempts reached', 'VERIFICATION_LOCKED', { suggestions: ['fix_issue', 'contact_support', 'manual_verification'] });
 
   const ninHash = hashNin(nin);
   // Only a NIN held by another VERIFIED account is refused; unverified claims on it are overridden.
   await assertNinAvailable(ninHash, req.user.id);
 
-  const record = { user_id: req.user.id, nin_hash: ninHash, nin_last3: nin.slice(-3) };
+  // Paid checks: take one paid-for check now (given back below if the provider can't run it).
+  const paymentId = fee ? await claimCredit(req.user.id) : null;
+  if (fee && !paymentId)
+    throw new HttpError(402, `Pay ₦${(fee / 100).toLocaleString('en-NG')} to run your NIN check`, 'PAYMENT_REQUIRED', { feeKobo: fee });
+
+  const record = { user_id: req.user.id, nin_hash: ninHash, nin_last3: nin.slice(-3), ...(paymentId ? { payment_id: paymentId } : {}) };
+  // Attempts left only means something for free checks; with a fee the user can always pay for another.
+  const left = () => (fee ? undefined : Math.max(0, env.NIN_MAX_ATTEMPTS - used - 1));
   try {
     const result = await verifyNinWithSelfie(nin, req.file.buffer.toString('base64'));
     // The NIMC name is kept so a reviewer can compare it with the name on the account (no other NIN data is stored).
@@ -135,7 +198,7 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
         return res.status(202).json({ status: 'in_review', message: 'Your selfie was a close match. Our team will review it and confirm by email, usually within 24 hours.' });
       }
       await insertVerification({ ...record, status: 'failed', confidence: result.confidence, failure_reason: 'FACE_MISMATCH', metadata: meta, ...evidence });
-      throw new HttpError(422, 'We could not match your selfie to your NIN record', 'FACE_MISMATCH', { attemptsRemaining: Math.max(0, env.NIN_MAX_ATTEMPTS - used - 1) });
+      throw new HttpError(422, 'We could not match your selfie to your NIN record', 'FACE_MISMATCH', { attemptsRemaining: left(), feeKobo: fee || undefined });
     }
     await insertVerification({ ...record, status: 'success', confidence: result.confidence, metadata: { ...meta, approved_by: faceOk ? 'face_match' : 'identity_score' }, ...evidence })
       .catch((err) => logger.error({ err }, 'could not save the successful NIN check'));
@@ -144,9 +207,17 @@ r.post('/nin', upload.single('selfie'), async (req, res) => {
     await notify(req.user.id, 'verified', 'Identity verified ✅', 'You now have full access to RentCreeb.');
     res.json({ status: 'verified', ninLast3: nin.slice(-3) });
   } catch (err) {
-    // Only count NIN-not-found as a user attempt; provider outages shouldn't burn attempts.
-    if (err instanceof HttpError && err.code === 'NIN_NOT_FOUND')
-      await db.from('verifications').insert({ ...record, status: 'failed', failure_reason: 'NIN_NOT_FOUND' });
+    const code = err instanceof HttpError ? err.code : undefined;
+    if (code === 'NIN_NOT_FOUND') {
+      // A completed check (Bytid ran the lookup): counts as an attempt and uses the paid check. The selfie is kept for the admin page.
+      const selfie_path = await keepForReview(req.user.id, req.file, 'selfie');
+      await insertVerification({ ...record, status: 'failed', failure_reason: 'NIN_NOT_FOUND', selfie_path, nimc_record: { data: { status: 'not_found' } } })
+        .catch((e) => logger.error({ err: e }, 'could not save the NIN-not-found check'));
+      if (fee) (err as HttpError).details = { ...(((err as HttpError).details as object) ?? {}), feeKobo: fee };
+    } else if (code !== 'FACE_MISMATCH') {
+      // Provider outage, timeout, unreadable selfie …: not the user's fault, so the paid check is given back.
+      await releaseCredit(paymentId);
+    }
     throw err;
   }
 });
