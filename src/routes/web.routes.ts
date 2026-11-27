@@ -8,7 +8,7 @@ import { passwordSchema } from '../lib/common';
 import { authenticate, requireRole } from '../middleware/auth';
 import { sendEmail } from '../lib/email';
 import { logger } from '../lib/logger';
-import { sendWaitlistWelcome } from '../services/mailing';
+import { markWaitlistContacted, sendWaitlistWelcome } from '../services/mailing';
 import { isWebUrl, makeLinkToken, readLinkToken } from '../lib/webAuth';
 import { aiChat, aiEnabled } from '../lib/ai';
 
@@ -208,8 +208,10 @@ r.post('/waitlist', limiter, async (req, res) => {
     : unwrap(await db.from('mailing_contacts').insert({ email: b.email, first_name: first, last_name: rest.join(' ') || null, source: 'signup_form', status: 'subscribed', consent_at: new Date().toISOString(), confirmed_at: new Date().toISOString(), tags: ['waitlist'], attributes }).select().single());
   // Welcome email straight away: the "Waitlist welcome" automation (Admin → Mailing → Automations), or a plain fallback
   // if it's switched off or mailing isn't set up. And a note to the RentCreeb inbox.
+  // Either way, a delivered welcome moves them from "pending" to "contacted" in Admin → Waitlist.
   void sendWaitlistWelcome(row.id).then((done) => done ? undefined :
-    sendEmail(b.email, "🎉 You're on the RentCreeb waitlist!", emailHtml(first, "Thanks for joining the RentCreeb waitlist. We'll let you know as soon as it's ready for you.", env.WEB_BASE_URL, 'Visit RentCreeb')))
+    sendEmail(b.email, "🎉 You're on the RentCreeb waitlist!", emailHtml(first, "Thanks for joining the RentCreeb waitlist. We'll let you know as soon as it's ready for you.", env.WEB_BASE_URL, 'Visit RentCreeb'))
+      .then((sent) => sent ? markWaitlistContacted([row.id]) : undefined))
     .catch((err) => logger.warn({ err: err?.message }, 'waitlist welcome email failed'));
   void sendEmail(env.WEB_CONTACT_EMAIL, `New Waitlist Signup • ${b.name}`, plainHtml([
     ['Name', b.name], ['Email', b.email], ['Phone', b.phone], ['State', b.state ?? ''], ['LGA', b.lga ?? ''], ['City', b.city ?? ''],

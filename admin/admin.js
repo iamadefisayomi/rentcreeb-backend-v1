@@ -1240,26 +1240,91 @@
   var WL_STATUS = [['pending', 'Pending'], ['contacted', 'Contacted'], ['invited', 'Invited'], ['joined', 'Joined the app'], ['declined', 'Not interested']];
   var WL_TONE = { pending: 'warn', contacted: '', invited: '', joined: 'ok', declined: 'grey' };
   function wlLabel(s) { var f = WL_STATUS.filter(function (x) { return x[0] === s; })[0]; return f ? f[1] : s; }
+  // Group by: [param, label]. Clicking a group filters the list to it (the same param name is the filter).
+  var WL_GROUPS = [['month', 'Month'], ['week', 'Week'], ['day', 'Day'], ['state', 'State'], ['lga', 'LGA'], ['city', 'City'], ['iAm', 'I am'], ['interest', 'Interested in'], ['status', 'Status'], ['source', 'Source']];
+  var WL_FILTERS = ['month', 'week', 'day', 'state', 'lga', 'city', 'iAm', 'interest', 'source'];
+  function wlGroupName(by) { var g = WL_GROUPS.filter(function (x) { return x[0] === by; })[0]; return g ? g[1] : by; }
+  function wlKeyLabel(by, key, lbl) {
+    if (key === '-' || key === '') return 'Not given';
+    if (by === 'month') return new Date(key + '-01T12:00:00').toLocaleDateString('en-NG', { month: 'long', year: 'numeric' });
+    if (by === 'week') return 'Week of ' + new Date(key + 'T12:00:00').toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' });
+    if (by === 'day') return new Date(key + 'T12:00:00').toLocaleDateString('en-NG', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    if (by === 'status') return wlLabel(key);
+    return lbl || key;
+  }
   PAGES.waitlist = function (r) {
-    var page = Number(r.q.page || 1); var f = { q: r.q.q, status: r.q.status };
-    shell('waitlist', 'Waitlist', 'People who joined the waitlist on rentcreeb.com. New sign-ups get the “Waitlist welcome” email straight away (Mailing → Automations).',
+    var page = Number(r.q.page || 1);
+    var f = { q: r.q.q, status: r.q.status, from: r.q.from, to: r.q.to, group: r.q.group, then: r.q.then };
+    WL_FILTERS.forEach(function (k) { if (r.q[k]) f[k] = r.q[k]; });
+    var hashWith = function (o) { return '/waitlist' + qs(Object.assign({}, f, o)); };
+    var filtering = function () { return Object.keys(f).some(function (k) { return f[k] && k !== 'group' && k !== 'then'; }); };
+    shell('waitlist', 'Waitlist', 'People who joined the waitlist on rentcreeb.com. New sign-ups get the “Waitlist welcome” email straight away (Mailing → Automations) and move to “Contacted” once it is sent.',
       isManager() ? '' : '<button class="btn sm" id="wl-export">Export CSV</button><a class="btn sm primary" href="#/mail-campaigns/new?for=waitlist">Email the waitlist</a>');
     api('/admin/waitlist' + qs(Object.assign({ page: page, limit: PAGE }, f))).then(function (j) {
-      var s = j.summary; var items = j.items;
-      var stat = function (n, l) { return '<div class="card stat"><span class="n">' + num(n) + '</span><span class="l">' + esc(l) + '</span></div>'; };
-      view('<div class="grid cols-4" style="margin-bottom:16px">' + stat(s.total, 'On the waitlist') + stat(s.lastWeek, 'Joined in the last 7 days') + stat(s.byStatus.pending || 0, 'Not contacted yet') + stat(s.byStatus.joined || 0, 'Joined the app') + '</div>' +
-        tabs([['', 'All', String(s.total)]].concat(WL_STATUS.map(function (x) { return [x[0], x[1], String(s.byStatus[x[0]] || 0)]; })), f.status || '', function (t) { return '/waitlist' + qs({ q: f.q, status: t }); }) +
-        '<form class="row" id="wlf" style="margin:12px 0"><input class="input" name="q" placeholder="Search name or email" value="' + esc(f.q || '') + '"><button class="btn">Search</button></form>' +
-        '<div class="card">' + table(['Joined', 'Person', 'I am', 'Interested in', 'Location', 'Status', ''], items, function (x, i) {
+      var s = j.summary; var items = j.items; var groups = j.groups;
+      var stat = function (n, l, h) { var tag = h ? 'a' : 'div'; return '<' + tag + (h ? ' href="#' + h + '"' : '') + ' class="card stat"><span class="n">' + num(n) + '</span><span class="l">' + esc(l) + '</span></' + tag + '>'; };
+      var opt = function (list, cur, none) { return '<option value="">' + esc(none) + '</option>' + list.map(function (x) { return '<option value="' + esc(x[0]) + '"' + (x[0] === cur ? ' selected' : '') + '>' + esc(x[1]) + '</option>'; }).join(''); };
+      // Drill-down filters currently applied, each removable.
+      var active = WL_FILTERS.filter(function (k) { return f[k]; }).map(function (k) {
+        var o = {}; o[k] = undefined; o.page = undefined;
+        return '<a class="badge grey" href="#' + hashWith(o) + '" title="Remove this filter">' + esc(wlGroupName(k) + ': ' + wlKeyLabel(k, f[k], f[k])) + ' ✕</a>';
+      });
+      var groupHtml = '';
+      if (groups) {
+        var max = Math.max.apply(null, groups.map(function (g) { return g.count; }).concat([1]));
+        var sum = groups.reduce(function (t, g) { return t + g.count; }, 0);
+        var row = function (g, by, o, sub) {
+          var pct = j.total ? Math.round((g.count / j.total) * 100) : 0;
+          return '<tr class="click" data-wlg="' + esc(JSON.stringify(o)) + '"><td' + (sub ? ' style="padding-left:28px"' : '') + '>' + (sub ? '<span class="faint">↳ </span>' + esc(wlKeyLabel(by, g.key, g.label)) : '<b>' + esc(wlKeyLabel(by, g.key, g.label)) + '</b>') + '</td>' +
+            '<td class="num"><b>' + num(g.count) + '</b> <span class="faint">' + pct + '%</span></td>' +
+            '<td style="min-width:120px"><div class="bar-track"><div class="bar-fill" style="background:var(--primary);width:' + Math.max(2, Math.round((g.count / max) * 100)) + '%"></div></div></td>' +
+            '<td class="num">' + num(g.contacted) + '</td><td class="num">' + num(g.joined) + '</td><td class="faint">' + day(g.latest) + '</td></tr>';
+        };
+        var setDim = function (o, by, key) { if (by === 'status') o.status = key; else o[by] = key; };
+        var rows = [];
+        groups.forEach(function (g) {
+          // Drilling into a group: switch to the "then by" grouping if there is one, otherwise just list those people.
+          var o = { page: null, then: null, group: f.then && f.then !== f.group ? f.then : null }; // null, not undefined: it must survive JSON in data-wlg
+          setDim(o, f.group, g.key);
+          rows.push(row(g, f.group, o, false));
+          (g.sub || []).forEach(function (x) {
+            var o2 = Object.assign({}, o, { group: null });
+            setDim(o2, f.then, x.key);
+            rows.push(row(x, f.then, o2, true));
+          });
+        });
+        var title = 'By ' + wlGroupName(f.group).toLowerCase() + (f.then && f.then !== f.group ? ', then ' + wlGroupName(f.then).toLowerCase() : '');
+        groupHtml = '<div class="card" style="margin-bottom:16px"><div class="row between" style="margin-bottom:8px;flex-wrap:wrap;gap:6px"><h3>' + esc(title) + '</h3>' +
+          '<span class="faint">' + num(groups.length) + ' group' + (groups.length === 1 ? '' : 's') + (f.group === 'interest' && sum !== j.total ? ' · people can pick more than one interest' : '') + ' · click a row to see those people</span></div>' +
+          (rows.length ? '<div class="table-wrap"><table><thead><tr><th>' + esc(wlGroupName(f.group)) + '</th><th>People</th><th></th><th>Contacted</th><th>Joined the app</th><th>Latest</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>' : '<div class="empty">Nobody matches.</div>') + '</div>';
+      }
+      view('<div class="grid cols-4" style="margin-bottom:16px">' + stat(s.total, 'On the waitlist') + stat(s.thisMonth, 'Joined this month') + stat(s.lastWeek, 'Joined in the last 7 days') +
+        stat(s.byStatus.pending || 0, 'Not contacted yet', '/waitlist?status=pending') + stat(s.byStatus.joined || 0, 'Joined the app', '/waitlist?status=joined') + '</div>' +
+        tabs([['', 'All', String(s.total)]].concat(WL_STATUS.map(function (x) { return [x[0], x[1], String(s.byStatus[x[0]] || 0)]; })), f.status || '', function (t) { return hashWith({ status: t, page: undefined }); }) +
+        '<form class="row" id="wlf" style="margin:12px 0;flex-wrap:wrap;gap:8px"><input class="input" name="q" placeholder="Search name, email or phone" value="' + esc(f.q || '') + '">' +
+        '<input class="input" type="date" name="from" value="' + esc(f.from || '') + '" aria-label="Joined from" title="Joined from"><input class="input" type="date" name="to" value="' + esc(f.to || '') + '" aria-label="Joined to" title="Joined to">' +
+        '<select class="input" name="group" aria-label="Group by">' + opt(WL_GROUPS, f.group, 'No grouping') + '</select>' +
+        '<select class="input" name="then" aria-label="Then group by"' + (f.group ? '' : ' hidden') + '>' + opt(WL_GROUPS, f.then, 'Then by… (optional)') + '</select>' +
+        '<button class="btn primary">Apply</button>' + (filtering() || f.group ? '<a class="btn" href="#/waitlist">Clear</a>' : '') + '</form>' +
+        (active.length ? '<div class="chips" style="margin-bottom:12px;align-items:center"><span class="faint">Showing only:</span>' + active.join('') + '</div>' : '') +
+        groupHtml +
+        '<div class="card">' + (groups ? '<h3 style="margin-bottom:8px">People (' + num(j.total) + ')</h3>' : '') + table(['Joined', 'Person', 'I am', 'Interested in', 'Location', 'Status', ''], items, function (x, i) {
           return '<tr class="click" data-wl="' + i + '"><td class="num">' + when(x.createdAt) + '</td><td><b>' + esc(x.name || '—') + '</b><div class="faint">' + esc(x.email) + (x.phone ? ' · ' + esc(x.phone) : '') + '</div></td>' +
             '<td>' + esc(x.iAm || '—') + '</td><td><div class="chips">' + x.interest.map(function (t) { return badge(t, 'grey'); }).join('') + '</div></td>' +
-            '<td class="faint">' + esc([x.city, x.lga, x.state].filter(Boolean).join(', ') || '—') + '</td><td>' + badge(wlLabel(x.status), WL_TONE[x.status]) + (x.notes ? ' <span class="faint" title="Has notes">✎</span>' : '') + '</td>' +
+            '<td class="faint">' + esc([x.city, x.lga, x.state].filter(Boolean).join(', ') || '—') + '</td><td>' + badge(wlLabel(x.status), WL_TONE[x.status]) + (x.notes ? ' <span class="faint" title="Has notes">✎</span>' : '') +
+            (x.contactedAt ? '<div class="faint" style="font-size:12px" title="Contacted">' + esc(day(x.contactedAt)) + '</div>' : '') + '</td>' +
             '<td><button class="btn sm" data-wl="' + i + '">Open</button></td></tr>';
-        }, f.q || f.status ? 'Nobody matches.' : 'Nobody has joined the waitlist yet.') + '</div>' + pager(page, j.total, r.raw));
-      $('#wlf').onsubmit = function (e) { e.preventDefault(); location.hash = '#/waitlist' + qs({ q: e.target.q.value.trim(), status: f.status }); };
+        }, filtering() ? 'Nobody matches.' : 'Nobody has joined the waitlist yet.') + '</div>' + pager(page, j.total, r.raw));
+      var fm = $('#wlf');
+      fm.group.onchange = function () { fm.then.hidden = !fm.group.value; if (!fm.group.value) fm.then.value = ''; };
+      fm.onsubmit = function (e) {
+        e.preventDefault(); var t = e.target;
+        location.hash = '#' + hashWith({ q: t.q.value.trim(), from: t.from.value, to: t.to.value, group: t.group.value, then: t.group.value && t.then.value !== t.group.value ? t.then.value : '', page: undefined });
+      };
       bind('[data-wl]', function (i) { waitlistEntry(items[Number(i)]); });
+      bind('[data-wlg]', function (o) { location.hash = '#' + hashWith(JSON.parse(o)); });
     }).catch(fail);
-    on('wl-export', function () { download('/admin/waitlist.csv' + qs(f), 'rentcreeb-waitlist.csv'); });
+    on('wl-export', function () { download('/admin/waitlist.csv' + qs(f), f.group ? 'rentcreeb-waitlist-by-' + f.group + '.csv' : 'rentcreeb-waitlist.csv'); });
   };
   function waitlistEntry(x) {
     var rowOf = function (k, v) { return v ? '<div class="row between" style="gap:12px;padding:6px 0;border-bottom:1px solid var(--line, #e5e7eb)"><span class="faint">' + esc(k) + '</span><span style="text-align:right">' + v + '</span></div>' : ''; };

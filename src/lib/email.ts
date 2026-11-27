@@ -24,12 +24,14 @@ const payload = (m: EmailMessage) => ({
 });
 
 /** Transactional email. Never throws (logs instead). */
-export async function sendEmail(to: string, subject: string, html: string, extra: Omit<EmailMessage, 'to' | 'subject' | 'html'> = {}) {
-  if (!resend) return logger.debug({ to, subject }, '[DEV EMAIL skipped]');
+/** Never throws; resolves true when the provider accepted the email. */
+export async function sendEmail(to: string, subject: string, html: string, extra: Omit<EmailMessage, 'to' | 'subject' | 'html'> = {}): Promise<boolean> {
+  if (!resend) { logger.debug({ to, subject }, '[DEV EMAIL skipped]'); return false; }
   try {
     const { error } = await resend.emails.send(payload({ to, subject, html, ...extra }) as any);
-    if (error) logger.error({ err: error, subject }, 'email failed');
-  } catch (err) { logger.error({ err }, 'email failed'); }
+    if (error) { logger.error({ err: error, subject }, 'email failed'); return false; }
+    return true;
+  } catch (err) { logger.error({ err }, 'email failed'); return false; }
 }
 
 /** Up to 100 emails in one API call. Returns the provider id per message (same order) or throws. */

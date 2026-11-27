@@ -312,6 +312,19 @@ export async function enqueueAutomations() {
 }
 
 /**
+ * The waitlist welcome went out: move these people from "pending" to "contacted" in Admin → Waitlist.
+ * Anyone an admin already moved further along (invited, joined, not interested) is left as they are.
+ */
+export async function markWaitlistContacted(contactIds: string[], at = new Date().toISOString()) {
+  if (!contactIds.length) return;
+  try {
+    const { data } = await db.from('mailing_contacts').select('id, attributes').in('id', [...new Set(contactIds)]).contains('tags', ['waitlist']);
+    await Promise.all((data ?? []).filter((c: any) => !c.attributes?.waitlistStatus || c.attributes.waitlistStatus === 'pending').map((c: any) =>
+      db.from('mailing_contacts').update({ attributes: { ...(c.attributes ?? {}), waitlistStatus: 'contacted', waitlistContactedAt: at }, updated_at: at }).eq('id', c.id)));
+  } catch (err: any) { logger.warn({ err: err?.message }, 'could not mark waitlist contacts as contacted'); }
+}
+
+/**
  * Send the live "waitlist_joined" automation(s) to someone the moment they join, instead of waiting for the minute job.
  * Returns false when there is no live welcome automation or email isn't set up, so the caller can send a plain fallback.
  * The send is recorded in mailing_sends (one per automation and contact), so the minute job never sends it twice.
@@ -336,6 +349,7 @@ export async function sendWaitlistWelcome(contactId: string) {
       const at = new Date().toISOString();
       await db.from('mailing_sends').update({ status: 'sent', provider_id: id ?? null, sent_at: at, attempts: 1 }).eq('id', row.id);
       await db.from('mailing_contacts').update({ last_sent_at: at }).eq('id', c.id);
+      await markWaitlistContacted([c.id], at);
     } catch (err: any) {
       // Leave it to the minute job to retry.
       logger.warn({ err: err?.message }, 'waitlist welcome send failed; queued for retry');
@@ -393,6 +407,8 @@ export async function processMailQueue() {
           const at = new Date().toISOString();
           await Promise.all(out.map((o, i) => db.from('mailing_sends').update({ status: 'sent', provider_id: ids[i] ?? null, sent_at: at, attempts: o.send.attempts + 1, error: null }).eq('id', o.send.id)));
           await db.from('mailing_contacts').update({ last_sent_at: at }).in('id', out.map((o) => o.send.contact_id));
+          // Waitlist welcomes delivered by the queue (retries, imports, delayed welcomes) count as contacting them too.
+          await markWaitlistContacted(out.filter((o) => (content.get(o.send.automation_id ?? '') as any)?.trigger === 'waitlist_joined').map((o) => o.send.contact_id), at);
         } catch (err: any) {
           const rateLimited = err?.statusCode === 429 || /rate limit/i.test(err?.message ?? '');
           logger.error({ err: err?.message, rateLimited }, 'mailing batch failed');
